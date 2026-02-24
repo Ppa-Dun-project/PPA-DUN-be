@@ -1,0 +1,70 @@
+name: Discord Notifications
+
+on:
+  issues:
+    types: [opened, closed, reopened]
+  pull_request:
+    types: [opened, closed, reopened]
+
+jobs:
+  discord-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord Notification
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_LABELS: ${{ join(github.event.issue.labels.*.name, ', ') }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ "$EVENT_NAME" = "issues" ]; then
+            TITLE="$ISSUE_TITLE"
+            URL="$ISSUE_URL"
+            AUTHOR="$ISSUE_AUTHOR"
+
+            case "$ACTION" in
+              opened)   LABEL="New Issue"; COLOR=3066993 ;;
+              closed)   LABEL="Issue Closed"; COLOR=15158332 ;;
+              reopened) LABEL="Issue Reopened"; COLOR=16776960 ;;
+            esac
+
+            DESC="**Repo:** $REPO\n**Author:** $AUTHOR"
+            if [ -n "$ISSUE_LABELS" ]; then
+              DESC="$DESC\n**Labels:** $ISSUE_LABELS"
+            fi
+          else
+            TITLE="$PR_TITLE"
+            URL="$PR_URL"
+            AUTHOR="$PR_AUTHOR"
+
+            if [ "$ACTION" = "closed" ] && [ "$PR_MERGED" = "true" ]; then
+              LABEL="PR Merged"; COLOR=10181046
+            elif [ "$ACTION" = "closed" ]; then
+              LABEL="PR Closed"; COLOR=15158332
+            elif [ "$ACTION" = "opened" ]; then
+              LABEL="New PR"; COLOR=5814783
+            elif [ "$ACTION" = "reopened" ]; then
+              LABEL="PR Reopened"; COLOR=16776960
+            fi
+
+            DESC="**Repo:** $REPO\n**Author:** $AUTHOR\n**Branch:** $PR_HEAD → $PR_BASE"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg title "$LABEL: $TITLE" \
+            --arg url "$URL" \
+            --arg desc "$DESC" \
+            --argjson color "$COLOR" \
+            '{embeds: [{title: $title, url: $url, description: $desc, color: $color}]}')
+
+          curl -sf -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
