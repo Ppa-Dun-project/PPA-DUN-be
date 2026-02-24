@@ -16,55 +16,151 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           REPO: ${{ github.repository }}
+          SENDER: ${{ github.event.sender.login }}
+          SENDER_AVATAR: ${{ github.event.sender.avatar_url }}
+          SENDER_URL: ${{ github.event.sender.html_url }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
-          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_LABELS: ${{ join(github.event.issue.labels.*.name, ', ') }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
           PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_REVIEWERS: ${{ join(github.event.pull_request.requested_reviewers.*.login, ', ') }}
         run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
           if [ "$EVENT_NAME" = "issues" ]; then
             TITLE="$ISSUE_TITLE"
             URL="$ISSUE_URL"
-            AUTHOR="$ISSUE_AUTHOR"
+            NUMBER="$ISSUE_NUMBER"
+            BODY=$(echo "$ISSUE_BODY" | head -c 200)
 
             case "$ACTION" in
-              opened)   LABEL="New Issue"; COLOR=3066993 ;;
-              closed)   LABEL="Issue Closed"; COLOR=15158332 ;;
-              reopened) LABEL="Issue Reopened"; COLOR=16776960 ;;
+              opened)
+                EMOJI="📋"
+                LABEL="New Issue"
+                COLOR=3066993
+                ;;
+              closed)
+                EMOJI="✅"
+                LABEL="Issue Closed"
+                COLOR=15158332
+                ;;
+              reopened)
+                EMOJI="🔄"
+                LABEL="Issue Reopened"
+                COLOR=16776960
+                ;;
             esac
 
-            DESC="**Repo:** $REPO\n**Author:** $AUTHOR"
+            FIELDS="[]"
             if [ -n "$ISSUE_LABELS" ]; then
-              DESC="$DESC\n**Labels:** $ISSUE_LABELS"
+              FIELDS=$(jq -n --arg labels "$ISSUE_LABELS" \
+                '[{"name": "🏷️ Labels", "value": $labels, "inline": true}]')
             fi
+
+            if [ -n "$BODY" ]; then
+              FIELDS=$(echo "$FIELDS" | jq --arg body "$BODY" \
+                '. + [{"name": "📝 Description", "value": ($body + "..."), "inline": false}]')
+            fi
+
+            PAYLOAD=$(jq -n \
+              --arg title "$EMOJI $LABEL #$NUMBER" \
+              --arg url "$URL" \
+              --arg desc "**$TITLE**" \
+              --argjson color "$COLOR" \
+              --arg author "$SENDER" \
+              --arg author_icon "$SENDER_AVATAR" \
+              --arg author_url "$SENDER_URL" \
+              --arg footer "$REPO" \
+              --arg ts "$TIMESTAMP" \
+              --argjson fields "$FIELDS" \
+              '{
+                embeds: [{
+                  title: $title,
+                  url: $url,
+                  description: $desc,
+                  color: $color,
+                  author: { name: $author, icon_url: $author_icon, url: $author_url },
+                  fields: $fields,
+                  footer: { text: $footer },
+                  timestamp: $ts
+                }]
+              }')
           else
             TITLE="$PR_TITLE"
             URL="$PR_URL"
-            AUTHOR="$PR_AUTHOR"
+            NUMBER="$PR_NUMBER"
+            BODY=$(echo "$PR_BODY" | head -c 200)
 
             if [ "$ACTION" = "closed" ] && [ "$PR_MERGED" = "true" ]; then
-              LABEL="PR Merged"; COLOR=10181046
+              EMOJI="🎉"
+              LABEL="PR Merged"
+              COLOR=10181046
             elif [ "$ACTION" = "closed" ]; then
-              LABEL="PR Closed"; COLOR=15158332
+              EMOJI="❌"
+              LABEL="PR Closed"
+              COLOR=15158332
             elif [ "$ACTION" = "opened" ]; then
-              LABEL="New PR"; COLOR=5814783
+              EMOJI="🔔"
+              LABEL="New PR"
+              COLOR=5814783
             elif [ "$ACTION" = "reopened" ]; then
-              LABEL="PR Reopened"; COLOR=16776960
+              EMOJI="🔄"
+              LABEL="PR Reopened"
+              COLOR=16776960
             fi
 
-            DESC="**Repo:** $REPO\n**Author:** $AUTHOR\n**Branch:** $PR_HEAD → $PR_BASE"
-          fi
+            FIELDS=$(jq -n \
+              --arg branch "$PR_HEAD → $PR_BASE" \
+              --arg changes "+$PR_ADDITIONS / -$PR_DELETIONS ($PR_CHANGED_FILES files)" \
+              '[
+                {"name": "🔀 Branch", "value": $branch, "inline": true},
+                {"name": "📊 Changes", "value": $changes, "inline": true}
+              ]')
 
-          PAYLOAD=$(jq -n \
-            --arg title "$LABEL: $TITLE" \
-            --arg url "$URL" \
-            --arg desc "$DESC" \
-            --argjson color "$COLOR" \
-            '{embeds: [{title: $title, url: $url, description: $desc, color: $color}]}')
+            if [ -n "$PR_REVIEWERS" ]; then
+              FIELDS=$(echo "$FIELDS" | jq --arg reviewers "$PR_REVIEWERS" \
+                '. + [{"name": "👀 Reviewers", "value": $reviewers, "inline": true}]')
+            fi
+
+            if [ -n "$BODY" ]; then
+              FIELDS=$(echo "$FIELDS" | jq --arg body "$BODY" \
+                '. + [{"name": "📝 Description", "value": ($body + "..."), "inline": false}]')
+            fi
+
+            PAYLOAD=$(jq -n \
+              --arg title "$EMOJI $LABEL #$NUMBER" \
+              --arg url "$URL" \
+              --arg desc "**$TITLE**" \
+              --argjson color "$COLOR" \
+              --arg author "$SENDER" \
+              --arg author_icon "$SENDER_AVATAR" \
+              --arg author_url "$SENDER_URL" \
+              --arg footer "$REPO" \
+              --arg ts "$TIMESTAMP" \
+              --argjson fields "$FIELDS" \
+              '{
+                embeds: [{
+                  title: $title,
+                  url: $url,
+                  description: $desc,
+                  color: $color,
+                  author: { name: $author, icon_url: $author_icon, url: $author_url },
+                  fields: $fields,
+                  footer: { text: $footer },
+                  timestamp: $ts
+                }]
+              }')
+          fi
 
           curl -sf -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
