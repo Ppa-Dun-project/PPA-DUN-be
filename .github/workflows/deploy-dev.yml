@@ -51,6 +51,7 @@ jobs:
             --zone=${{ env.GCP_ZONE }} \
             --command="sudo gcloud auth configure-docker us-east1-docker.pkg.dev --quiet && \
                        sudo docker pull ${{ env.IMAGE }}:latest && \
+                       cd /app/cl && sudo git pull origin main && \
                        cd /app/cl/dev && sudo docker compose up -d be"
 
   notify:
