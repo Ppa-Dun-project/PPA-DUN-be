@@ -3,18 +3,22 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-# basically use players prefix
+# Used by Player pages. This router owns player list/detail/filter APIs.
 router = APIRouter(prefix="/api/players", tags=["players"])
 
-# 선수 통계 정보 모델. PlayerOut의 stats 필드에 들어가는 모델
+
+# Used by PlayerDetail page. 선수의 상세 스탯 블록.
 class PlayerStats(BaseModel):
+    # 경기 수, 타석 수, 홈런 수, OPS (타자)
     g: int
     pa: int
     hr: int
     ops: float
+    
+    # 이닝 수 (투수)
     ip: float = 0.0
 
-# 선수 상세 정보 응답 모델. PlayersDetailPage 에서 사용하는 모델
+# Used by PlayerDetail page. 선수 한명의 풀 데이터
 class PlayerOut(BaseModel):
     id: int
     name: str
@@ -25,22 +29,21 @@ class PlayerOut(BaseModel):
     throws: str
     team: str
     positions: List[str]
-    # [CHANGED] Frontend cards require valueScore from backend.
     valueScore: float
+    # 선수 사진 URL (선택적)
+    headshotUrl: Optional[str] = None
     stats: PlayerStats
 
-
-# 선수별 개인 정보를 보낼 때 
+# Used by player list/table cards. 테이블에 적을 주요 정보.
 class PlayerListItem(BaseModel):
     id: int
     name: str
     team: str
     positions: List[str]
-    # [CHANGED] Include valueScore in list responses.
     valueScore: float
+    headshotUrl: Optional[str] = None
 
-
-# PlayersPage 에서 사용하는 모델 (선수 정보 리스트 + 페이지네이션 정보)
+# Player list with 페이지네이션. (응답 형식)
 class PlayerListResponse(BaseModel):
     items: List[PlayerListItem]
     page: int
@@ -49,6 +52,24 @@ class PlayerListResponse(BaseModel):
     totalPages: int
 
 
+# Used by PlayersToolbar position chips. 포지션 필터링 목록 응답 형식
+class PlayerPositionFiltersResponse(BaseModel):
+    positions: List[str]
+
+# Used by PlayersToolbar sort dropdown. 
+# value_desc = ValueScore 내림차순, name_asc = 이름 오름차순 등
+class PlayerSortOption(BaseModel):
+    value: str
+    label: str
+
+# Used by PlayersToolbar sort dropdown. 
+# 위에서 매칭된 정렬 옵션 목록 응답 형식
+class PlayerSortFiltersResponse(BaseModel):
+    sorts: List[PlayerSortOption]
+
+SortOrder = Literal["value_desc", "value_asc", "name_asc", "name_desc"]
+
+# Mock source for player list/detail (later replace with DB rows).
 MOCK_PLAYERS: List[PlayerOut] = [
     PlayerOut(
         id=1,
@@ -247,11 +268,19 @@ MOCK_PLAYERS: List[PlayerOut] = [
     ),
 ]
 
-# 정렬 기준. 만약 프론트에서 더 추가 하는 것이 있다면 나도 여기에 추가한다.
-SortOrder = Literal["value_desc", "value_asc", "name_asc", "name_desc"]
+# Used by PlayersToolbar position chips.
+MOCK_PLAYER_POSITION_FILTERS: List[str] = ["ALL", "C", "1B", "2B", "3B", "SS", "OF", "P", "DH"]
+
+# Used by PlayersToolbar sort dropdown.
+# 드롭다운 옵션 추가하고 싶으면 여기에 하면 됨
+MOCK_PLAYER_SORT_OPTIONS: List[PlayerSortOption] = [
+    PlayerSortOption(value="value_desc", label="ValueScore (high -> low)"),
+    PlayerSortOption(value="value_asc", label="ValueScore (low -> high)"),
+    PlayerSortOption(value="name_asc", label="Name (A -> Z)"),
+    PlayerSortOption(value="name_desc", label="Name (Z -> A)"),
+]
 
 
-# 프론트에서 준 정렬 기준으로 정렬.
 def sort_players(players: List[PlayerOut], sort: SortOrder) -> List[PlayerOut]:
     if sort == "value_desc":
         return sorted(players, key=lambda p: p.valueScore, reverse=True)
@@ -263,9 +292,35 @@ def sort_players(players: List[PlayerOut], sort: SortOrder) -> List[PlayerOut]:
         return sorted(players, key=lambda p: p.name.lower(), reverse=True)
     return players
 
+# 선수 포지션이 현재 필터 조건과 맞는지 검사
+def matches_position_filter(player_positions: List[str], normalized_position: str) -> bool:
+    # 대문자로 통일
+    normalized = {pos.upper() for pos in player_positions}
+    if normalized_position == "ALL":
+        return True
+    
+    # Supports UI filter "P" while preserving SP/RP data in records.
+    if normalized_position == "P":
+        return bool(normalized.intersection({"P", "SP", "RP"}))
+    return normalized_position in normalized
 
-# GET /api/players
-# 이 함수가 GET 요청을 받는다, 최종 응답이 PlayerListResponse 형태가 된다. (FastAPI가 자동으로 검증)
+
+# Used by PlayersToolbar. Returns all available player positions.
+# 위에서 정한, 포지션 칩 옵션 제공 api.
+# 만약에 포지션을 더 추가하고 싶으면 여기 추가 하면 됨.
+@router.get("/filters/positions", response_model=PlayerPositionFiltersResponse)
+def get_player_position_filters():
+    return PlayerPositionFiltersResponse(positions=MOCK_PLAYER_POSITION_FILTERS)
+
+
+# Used by PlayersToolbar. Returns all available sort options.
+# 위에서 정한, 드롭다운에 표시할 정렬 옵션 제공 api.
+@router.get("/filters/sorts", response_model=PlayerSortFiltersResponse)
+def get_player_sort_options():
+    return PlayerSortFiltersResponse(sorts=MOCK_PLAYER_SORT_OPTIONS)
+
+
+# Used by player list page. Supports query/position/sort + pagination.
 @router.get("", response_model=PlayerListResponse)
 def get_players(
     query: Optional[str] = Query(default=None),
@@ -274,68 +329,40 @@ def get_players(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=8, ge=1),
 ):
-    """
-    위 4개는 쿼리 파라미터로 
-    GET /api/players?query=ohtani 에서 ohtani. 
-    GET /api/players?position=OF 에서 OF.
-    GET /api/players?sort=value_desc 에서 value_desc. 선수 정렬 기준
-    페이지네이션, 1페이지부터 시작, 1 이상만 허용
-    페이지네이션, 한 페이지당 선수 수, 1 이상만 허용
-    """
-    
-    
-    #검색어 정리 작업. 공백 제거, 소문자 통일
     keyword = (query or "").strip().lower()
-    
-    #포지션 정리 작업. 대소문자나 공백 차이 제거
     normalized_position = position.strip().upper()
 
-    # 위에서 파라미터로 받은 조건에 맞는 선수를 걸러낼 리스트
     filtered = []
-    
-    # 여기는 나중에 실제 DB 쿼리로 대체될 부분
     for player in MOCK_PLAYERS:
         matches_keyword = (
             not keyword
             or keyword in player.name.lower()
             or keyword in player.team.lower()
         )
-        matches_position = (
-            normalized_position == "ALL"
-            or normalized_position in {pos.upper() for pos in player.positions}
-        )
-        if matches_keyword and matches_position:
+        if matches_keyword and matches_position_filter(player.positions, normalized_position):
             filtered.append(player)
 
-    # DB에서 뽑아낸 선수 명단을 sort_players 함수로 정렬. 정렬 조건도 파라미터로 받음
     sorted_players = sort_players(filtered, sort)
-
-    # 뽑아낸 선수 명단의 페이지네이션 처리
     total = len(sorted_players)
     total_pages = (total + limit - 1) // limit if total > 0 else 0
-    # 뽑아낸 선수 명단 페이지 수 보다 사용자가 요청한 페이지 수가 더 많으면, 안전하게 최대 페이지로 조정
     safe_page = min(page, total_pages) if total_pages > 0 else 1
 
-    # 페이지에 해당하는 선수들만 잘라내는 부분 (프론트에서는 페이지가 넘어갈때마다 백엔드로 요청하는 형식)
     start = (safe_page - 1) * limit if total_pages > 0 else 0
     end = start + limit
     paged = sorted_players[start:end]
 
-    # 페이지에 해당 하는 선수들의 정보를 items 에 담음. PlayerListItem 형태로 변환
-    items = [
-        PlayerListItem(
-            id=p.id,
-            name=p.name,
-            team=p.team,
-            positions=p.positions,
-            valueScore=p.valueScore,
-        )
-        for p in paged
-    ]
-
-    # 프론트에 진짜 보내줄 데이터. 선수 정보와 페이지네이션 정보가 담김.
     return PlayerListResponse(
-        items=items,
+        items=[
+            PlayerListItem(
+                id=p.id,
+                name=p.name,
+                team=p.team,
+                positions=p.positions,
+                valueScore=p.valueScore,
+                headshotUrl=p.headshotUrl,
+            )
+            for p in paged
+        ],
         page=safe_page,
         limit=limit,
         total=total,
@@ -343,12 +370,10 @@ def get_players(
     )
 
 
-# GET /api/players/{player_id}
+# Used by PlayerDetail page.
 @router.get("/{player_id}", response_model=PlayerOut)
 def get_player_detail(player_id: int):
-    #
     for player in MOCK_PLAYERS:
         if player.id == player_id:
             return player
-
     raise HTTPException(status_code=404, detail="Player not found")
