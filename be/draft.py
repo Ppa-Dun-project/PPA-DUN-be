@@ -1,4 +1,4 @@
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -161,6 +161,9 @@ DEFAULT_OPPONENT_POOL = ["Blue Sox", "City Sluggers", "Night Owls", "Harbor Aces
 
 # In-memory draft room state (replace with DB later).
 DRAFT_PICKS_BY_ROOM: Dict[str, List[DraftPickOut]] = {"default": []}
+ROOM_STATE_VERSION: Dict[str, int] = {"default": 0}
+ALLOWED_POSITIONS_CACHE: Dict[Tuple[str, int, str, str, int], List[DraftPosition]] = {}
+OCCUPIED_SLOTS_CACHE: Dict[Tuple[str, int], Dict[str, Set[int]]] = {}
 
 SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "SP",
@@ -235,7 +238,27 @@ def sort_draft_players(players: List[DraftPlayerOut], sort: DraftSort) -> List[D
     return players
 
 
+def get_room_version(room_id: str) -> int:
+    return ROOM_STATE_VERSION.setdefault(room_id, 0)
+
+
+def clear_room_caches(room_id: str) -> None:
+    allowed_keys = [key for key in ALLOWED_POSITIONS_CACHE if key[0] == room_id]
+    for key in allowed_keys:
+        ALLOWED_POSITIONS_CACHE.pop(key, None)
+
+    occupied_keys = [key for key in OCCUPIED_SLOTS_CACHE if key[0] == room_id]
+    for key in occupied_keys:
+        OCCUPIED_SLOTS_CACHE.pop(key, None)
+
+
+def bump_room_version(room_id: str) -> None:
+    ROOM_STATE_VERSION[room_id] = get_room_version(room_id) + 1
+    clear_room_caches(room_id)
+
+
 def get_room_picks(room_id: str) -> List[DraftPickOut]:
+    get_room_version(room_id)
     return DRAFT_PICKS_BY_ROOM.setdefault(room_id, [])
 
 
@@ -257,6 +280,31 @@ def build_slot_template(roster_slots: int) -> List[DraftPosition]:
     return SLOT_TEMPLATE_BASE[:roster_slots]
 
 
+def find_available_slot_index_with_occupied(
+    desired_pos: DraftPosition,
+    slot_template: List[DraftPosition],
+    occupied: Set[int],
+) -> int:
+    first_util = -1
+    first_bench = -1
+
+    for i, slot in enumerate(slot_template):
+        if i in occupied:
+            continue
+        if slot == desired_pos:
+            return i
+        if first_util == -1 and slot == "UTIL":
+            first_util = i
+        if first_bench == -1 and slot == "BENCH":
+            first_bench = i
+
+    if first_util != -1:
+        return first_util
+    if first_bench != -1:
+        return first_bench
+    return -1
+
+
 def find_available_slot_index(
     team_id: str,
     desired_pos: DraftPosition,
@@ -264,26 +312,25 @@ def find_available_slot_index(
     picks: List[DraftPickOut],
 ) -> int:
     occupied = {pick.slotIndex for pick in picks if pick.draftedByTeamId == team_id}
+    return find_available_slot_index_with_occupied(desired_pos, slot_template, occupied)
 
-    for i, slot in enumerate(slot_template):
-        if i in occupied:
-            continue
-        if slot == desired_pos:
-            return i
 
-    for i, slot in enumerate(slot_template):
-        if i in occupied:
-            continue
-        if slot == "UTIL":
-            return i
+def get_occupied_slots_by_team(
+    room_id: str,
+    room_version: int,
+    picks: List[DraftPickOut],
+) -> Dict[str, Set[int]]:
+    cache_key = (room_id, room_version)
+    cached = OCCUPIED_SLOTS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    for i, slot in enumerate(slot_template):
-        if i in occupied:
-            continue
-        if slot == "BENCH":
-            return i
+    occupied_by_team: Dict[str, Set[int]] = {}
+    for pick in picks:
+        occupied_by_team.setdefault(pick.draftedByTeamId, set()).add(pick.slotIndex)
 
-    return -1
+    OCCUPIED_SLOTS_CACHE[cache_key] = occupied_by_team
+    return occupied_by_team
 
 
 def normalized_config(
@@ -403,13 +450,29 @@ def get_allowed_positions(
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    slot_template = build_slot_template(clamp_roster_slots(roster_players))
+    roster_slots = clamp_roster_slots(roster_players)
+    room_version = get_room_version(room_id)
+    cache_key = (room_id, room_version, team_id, player_id, roster_slots)
+    cached = ALLOWED_POSITIONS_CACHE.get(cache_key)
+    if cached is not None:
+        return DraftAllowedPositionsResponse(
+            roomId=room_id,
+            teamId=team_id,
+            playerId=player_id,
+            allowedPositions=cached,
+            defaultSelectedPos=cached[0] if cached else None,
+        )
+
+    slot_template = build_slot_template(roster_slots)
     picks = get_room_picks(room_id)
+    occupied_by_team = get_occupied_slots_by_team(room_id, room_version, picks)
+    team_occupied = occupied_by_team.get(team_id, set())
     allowed_positions = [
         pos
         for pos in player.positions
-        if find_available_slot_index(team_id, pos, slot_template, picks) != -1
+        if find_available_slot_index_with_occupied(pos, slot_template, team_occupied) != -1
     ]
+    ALLOWED_POSITIONS_CACHE[cache_key] = allowed_positions
 
     return DraftAllowedPositionsResponse(
         roomId=room_id,
@@ -436,11 +499,15 @@ def upsert_draft_pick(
     picks = get_room_picks(room_id)
     next_picks = [p for p in picks if p.playerId != payload.playerId]
     slot_template = build_slot_template(clamp_roster_slots(roster_players))
-    resolved_slot_index = find_available_slot_index(
-        payload.draftedByTeamId,
+    occupied = {
+        pick.slotIndex
+        for pick in next_picks
+        if pick.draftedByTeamId == payload.draftedByTeamId
+    }
+    resolved_slot_index = find_available_slot_index_with_occupied(
         payload.slotPos,
         slot_template,
-        next_picks,
+        occupied,
     )
     if resolved_slot_index == -1:
         raise HTTPException(status_code=409, detail="No available slot for selected position")
@@ -456,6 +523,7 @@ def upsert_draft_pick(
         )
     )
     DRAFT_PICKS_BY_ROOM[room_id] = next_picks
+    bump_room_version(room_id)
     return DraftPicksResponse(roomId=room_id, items=next_picks)
 
 
@@ -470,6 +538,7 @@ def delete_draft_pick(
     if len(next_picks) == len(picks):
         raise HTTPException(status_code=404, detail="Pick not found")
     DRAFT_PICKS_BY_ROOM[room_id] = next_picks
+    bump_room_version(room_id)
     return DraftPicksResponse(roomId=room_id, items=next_picks)
 
 
