@@ -1,15 +1,7 @@
-try:
-    # Package import path (e.g. `import backend.be.main`).
-    from .draft import router as draft_router
-    from .home import router as home_router
-    from .myteam import router as myteam_router
-    from .players import router as players_router
-except ImportError:
-    # Script import path (e.g. `uvicorn main:app` from backend/be).
-    from draft import router as draft_router
-    from home import router as home_router
-    from myteam import router as myteam_router
-    from players import router as players_router
+from draft import router as draft_router
+from home import router as home_router
+from myteam import router as myteam_router
+from players import router as players_router
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

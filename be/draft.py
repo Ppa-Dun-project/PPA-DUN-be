@@ -79,10 +79,18 @@ class DraftPickOut(BaseModel):
 class DraftPickUpsertIn(BaseModel):
     playerId: str
     draftedByTeamId: str
-    slotIndex: int
     slotPos: DraftPosition
     bid: Optional[int] = None
     type: DraftPickType
+    # Deprecated from frontend. Server now resolves slot index.
+    slotIndex: Optional[int] = None
+
+class DraftAllowedPositionsResponse(BaseModel):
+    roomId: str
+    teamId: str
+    playerId: str
+    allowedPositions: List[DraftPosition]
+    defaultSelectedPos: Optional[DraftPosition] = None
 
 class DraftPicksResponse(BaseModel):
     roomId: str
@@ -154,6 +162,34 @@ DEFAULT_OPPONENT_POOL = ["Blue Sox", "City Sluggers", "Night Owls", "Harbor Aces
 # In-memory draft room state (replace with DB later).
 DRAFT_PICKS_BY_ROOM: Dict[str, List[DraftPickOut]] = {"default": []}
 
+SLOT_TEMPLATE_BASE: List[DraftPosition] = [
+    "SP",
+    "SP",
+    "RP",
+    "SP",
+    "RP",
+    "C",
+    "1B",
+    "2B",
+    "3B",
+    "SS",
+    "OF",
+    "OF",
+    "OF",
+    "UTIL",
+    "UTIL",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+    "BENCH",
+]
+
 # 들어온 숫자를 특정 범위 안으로 강제로 맞춰주는 함수
 # 사용자가 이상한 값을 보내도, 자동으로 맞춰줌.
 def clamp_int(value: Optional[int], min_value: int, max_value: int, fallback: int) -> int:
@@ -201,6 +237,53 @@ def sort_draft_players(players: List[DraftPlayerOut], sort: DraftSort) -> List[D
 
 def get_room_picks(room_id: str) -> List[DraftPickOut]:
     return DRAFT_PICKS_BY_ROOM.setdefault(room_id, [])
+
+
+def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:
+    for player in MOCK_DRAFT_PLAYERS:
+        if player.id == player_id:
+            return player
+    return None
+
+
+def clamp_roster_slots(roster_players: Optional[int]) -> int:
+    fallback = DEFAULT_DRAFT_CONFIG.rosterPlayers
+    if roster_players is None:
+        return clamp_int(fallback, 8, len(SLOT_TEMPLATE_BASE), fallback)
+    return clamp_int(roster_players, 8, len(SLOT_TEMPLATE_BASE), fallback)
+
+
+def build_slot_template(roster_slots: int) -> List[DraftPosition]:
+    return SLOT_TEMPLATE_BASE[:roster_slots]
+
+
+def find_available_slot_index(
+    team_id: str,
+    desired_pos: DraftPosition,
+    slot_template: List[DraftPosition],
+    picks: List[DraftPickOut],
+) -> int:
+    occupied = {pick.slotIndex for pick in picks if pick.draftedByTeamId == team_id}
+
+    for i, slot in enumerate(slot_template):
+        if i in occupied:
+            continue
+        if slot == desired_pos:
+            return i
+
+    for i, slot in enumerate(slot_template):
+        if i in occupied:
+            continue
+        if slot == "UTIL":
+            return i
+
+    for i, slot in enumerate(slot_template):
+        if i in occupied:
+            continue
+        if slot == "BENCH":
+            return i
+
+    return -1
 
 
 def normalized_config(
@@ -308,19 +391,65 @@ def get_draft_picks(room_id: str = Query(default="default", alias="roomId")):
     return DraftPicksResponse(roomId=room_id, items=get_room_picks(room_id))
 
 
+# Used by Add Bid modal. Returns allowed positions/default position for a team/player.
+@router.get("/allowed-positions", response_model=DraftAllowedPositionsResponse)
+def get_allowed_positions(
+    player_id: str = Query(alias="playerId"),
+    team_id: str = Query(alias="teamId"),
+    room_id: str = Query(default="default", alias="roomId"),
+    roster_players: Optional[int] = Query(default=None, alias="rosterPlayers"),
+):
+    player = find_draft_player(player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    slot_template = build_slot_template(clamp_roster_slots(roster_players))
+    picks = get_room_picks(room_id)
+    allowed_positions = [
+        pos
+        for pos in player.positions
+        if find_available_slot_index(team_id, pos, slot_template, picks) != -1
+    ]
+
+    return DraftAllowedPositionsResponse(
+        roomId=room_id,
+        teamId=team_id,
+        playerId=player_id,
+        allowedPositions=allowed_positions,
+        defaultSelectedPos=allowed_positions[0] if allowed_positions else None,
+    )
+
+
 # Used by Draft Add/Taken actions. Upserts a player's draft pick state.
 @router.post("/picks", response_model=DraftPicksResponse)
 def upsert_draft_pick(
     payload: DraftPickUpsertIn,
     room_id: str = Query(default="default", alias="roomId"),
+    roster_players: Optional[int] = Query(default=None, alias="rosterPlayers"),
 ):
+    player = find_draft_player(payload.playerId)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if payload.slotPos not in player.positions:
+        raise HTTPException(status_code=400, detail="Invalid slot position for player")
+
     picks = get_room_picks(room_id)
     next_picks = [p for p in picks if p.playerId != payload.playerId]
+    slot_template = build_slot_template(clamp_roster_slots(roster_players))
+    resolved_slot_index = find_available_slot_index(
+        payload.draftedByTeamId,
+        payload.slotPos,
+        slot_template,
+        next_picks,
+    )
+    if resolved_slot_index == -1:
+        raise HTTPException(status_code=409, detail="No available slot for selected position")
+
     next_picks.append(
         DraftPickOut(
             playerId=payload.playerId,
             draftedByTeamId=payload.draftedByTeamId,
-            slotIndex=payload.slotIndex,
+            slotIndex=resolved_slot_index,
             slotPos=payload.slotPos,
             bid=payload.bid,
             type=payload.type,
