@@ -6,7 +6,7 @@ on:
       - main
 
 env:
-  GCP_ZONE: us-east1-b
+  GCP_REGION: us-east1
   IMAGE: us-east1-docker.pkg.dev/v1-mvp/be-prod/be
   MIG_NAME: instance-group-1
 
@@ -49,7 +49,7 @@ jobs:
       - name: Rolling update MIG
         run: |
           gcloud compute instance-groups managed rolling-action restart ${{ env.MIG_NAME }} \
-            --zone=${{ env.GCP_ZONE }}
+            --region=${{ env.GCP_REGION }}
 
   notify:
     needs: deploy
