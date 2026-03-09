@@ -165,9 +165,9 @@ DEFAULT_DRAFT_CONFIG = DraftConfigOut(
     budget=260,
     rosterPlayers=23,
     myTeamName="PPA-DUN",
-    oppTeamName="Rivals",
+    oppTeamName="Opponent 1",
     opponentsCount=5,
-    oppTeamNames=["Rivals", "Blue Sox", "City Sluggers", "Night Owls", "Harbor Aces"],
+    oppTeamNames=["Opponent 1", "Opponent 2", "Opponent 3", "Opponent 4", "Opponent 5"],
 )
 
 
@@ -230,7 +230,7 @@ def build_draft_teams(my_team_name: str, opp_team_name: str, opponents_count: in
     if opponents_count <= 0:
         return teams
 
-    teams.append(DraftTeamOut(id="team-opp", name=opp_team_name or "Opponent", isMine=False))
+    teams.append(DraftTeamOut(id="team-opp", name=opp_team_name or "Opponent 1", isMine=False))
     for i in range(max(0, opponents_count - 1)):
         fallback = f"Opponent {i + 2}"
         teams.append(DraftTeamOut(id=f"team-{i + 3}", name=fallback, isMine=False))
