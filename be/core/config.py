@@ -1,15 +1,25 @@
-from pathlib import Path
+﻿from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-BASE_DIR = Path(__file__).resolve().parents[2]  # backend/
-ENV_FILE = BASE_DIR / ".env"
+
+_BASE_DIR = Path(__file__).resolve().parents[2]  # backend/
+_ENV_FILE = _BASE_DIR / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
-
-    APP_NAME: str = "PPA-Dun API"
+    APP_NAME: str = "My FastAPI"
     ENV: str = "dev"
-    DATABASE_URL: str  # mysql+pymysql://user:pass@host:3306/dbname
-    CORS_ORIGINS: str = "http://localhost:5173"
+    CORS_ORIGINS: str = ""
+    EXTERNAL_API_BASE_URL: str = ""
+    EXTERNAL_API_KEY: str = ""
+    EXTERNAL_API_TIMEOUT_SECONDS: float = 5.0
+
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
 
 settings = Settings()
