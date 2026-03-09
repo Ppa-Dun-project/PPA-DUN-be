@@ -223,17 +223,28 @@ def clamp_int(value: Optional[int], min_value: int, max_value: int, fallback: in
 
 # 드래프트 방에 들어갈 팀 목록을 생성하는 함수
 # 
-def build_draft_teams(my_team_name: str, opp_team_name: str, opponents_count: int) -> List[DraftTeamOut]:
+def build_draft_teams(
+    my_team_name: str,
+    opp_team_name: str,
+    opponents_count: int,
+    opp_team_names: Optional[List[str]] = None,
+) -> List[DraftTeamOut]:
     teams: List[DraftTeamOut] = [
         DraftTeamOut(id="team-me", name=my_team_name or "My Team", isMine=True)
     ]
     if opponents_count <= 0:
         return teams
 
-    teams.append(DraftTeamOut(id="team-opp", name=opp_team_name or "Opponent 1", isMine=False))
-    for i in range(max(0, opponents_count - 1)):
-        fallback = f"Opponent {i + 2}"
-        teams.append(DraftTeamOut(id=f"team-{i + 3}", name=fallback, isMine=False))
+    names = opp_team_names or []
+    for i in range(opponents_count):
+        if i < len(names) and names[i].strip():
+            name = names[i].strip()
+        elif i == 0:
+            name = opp_team_name or "Opponent 1"
+        else:
+            name = f"Opponent {i + 1}"
+        team_id = "team-opp" if i == 0 else f"team-{i + 2}"
+        teams.append(DraftTeamOut(id=team_id, name=name, isMine=False))
     return teams
 
 
@@ -526,6 +537,7 @@ def normalized_config(
     my_team_name: str,
     opp_team_name: str,
     opponents_count: Optional[int],
+    opp_team_names: Optional[List[str]] = None,
 ) -> DraftConfigOut:
     normalized_budget = clamp_int(budget, 50, 600, DEFAULT_DRAFT_CONFIG.budget)
     normalized_roster = clamp_int(roster_players, 12, 35, DEFAULT_DRAFT_CONFIG.rosterPlayers)
@@ -535,6 +547,7 @@ def normalized_config(
         my_team_name=my_team_name.strip() or DEFAULT_DRAFT_CONFIG.myTeamName,
         opp_team_name=opp_team_name.strip() or DEFAULT_DRAFT_CONFIG.oppTeamName,
         opponents_count=normalized_opponents,
+        opp_team_names=opp_team_names,
     )
     opp_team_names = [t.name for t in teams if not t.isMine]
     return DraftConfigOut(
@@ -572,8 +585,14 @@ def get_draft_teams(
     my_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.myTeamName, alias="myTeamName"),
     opp_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.oppTeamName, alias="oppTeamName"),
     opponents_count: int = Query(default=DEFAULT_DRAFT_CONFIG.opponentsCount, alias="opponentsCount", ge=0, le=12),
+    opp_team_names: Optional[List[str]] = Query(default=None, alias="oppTeamNames"),
 ):
-    teams = build_draft_teams(my_team_name=my_team_name, opp_team_name=opp_team_name, opponents_count=opponents_count)
+    teams = build_draft_teams(
+        my_team_name=my_team_name,
+        opp_team_name=opp_team_name,
+        opponents_count=opponents_count,
+        opp_team_names=opp_team_names,
+    )
     return DraftTeamsResponse(items=teams)
 
 
@@ -769,6 +788,7 @@ def get_draft_bootstrap(
     my_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.myTeamName, alias="myTeamName"),
     opp_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.oppTeamName, alias="oppTeamName"),
     opponents_count: Optional[int] = Query(default=None, alias="opponentsCount"),
+    opp_team_names: Optional[List[str]] = Query(default=None, alias="oppTeamNames"),
     room_id: str = Query(default="default", alias="roomId"),
 ):
     config = normalized_config(
@@ -778,8 +798,9 @@ def get_draft_bootstrap(
         my_team_name=my_team_name,
         opp_team_name=opp_team_name,
         opponents_count=opponents_count,
+        opp_team_names=opp_team_names,
     )
-    teams = build_draft_teams(config.myTeamName, config.oppTeamName, config.opponentsCount)
+    teams = build_draft_teams(config.myTeamName, config.oppTeamName, config.opponentsCount, opp_team_names=config.oppTeamNames)
     picks = get_room_picks(room_id)
     return DraftBootstrapResponse(
         config=config,
