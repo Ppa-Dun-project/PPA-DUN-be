@@ -585,13 +585,14 @@ def get_draft_teams(
     my_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.myTeamName, alias="myTeamName"),
     opp_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.oppTeamName, alias="oppTeamName"),
     opponents_count: int = Query(default=DEFAULT_DRAFT_CONFIG.opponentsCount, alias="opponentsCount", ge=0, le=12),
-    opp_team_names: Optional[List[str]] = Query(default=None, alias="oppTeamNames"),
+    opp_team_names: Optional[str] = Query(default=None, alias="oppTeamNames"),
 ):
+    parsed_names = [n.strip() for n in opp_team_names.split(",") if n.strip()] if opp_team_names else None
     teams = build_draft_teams(
         my_team_name=my_team_name,
         opp_team_name=opp_team_name,
         opponents_count=opponents_count,
-        opp_team_names=opp_team_names,
+        opp_team_names=parsed_names,
     )
     return DraftTeamsResponse(items=teams)
 
@@ -788,9 +789,10 @@ def get_draft_bootstrap(
     my_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.myTeamName, alias="myTeamName"),
     opp_team_name: str = Query(default=DEFAULT_DRAFT_CONFIG.oppTeamName, alias="oppTeamName"),
     opponents_count: Optional[int] = Query(default=None, alias="opponentsCount"),
-    opp_team_names: Optional[List[str]] = Query(default=None, alias="oppTeamNames"),
+    opp_team_names: Optional[str] = Query(default=None, alias="oppTeamNames"),
     room_id: str = Query(default="default", alias="roomId"),
 ):
+    parsed_names = [n.strip() for n in opp_team_names.split(",") if n.strip()] if opp_team_names else None
     config = normalized_config(
         league_type=league_type,
         budget=budget,
@@ -798,7 +800,7 @@ def get_draft_bootstrap(
         my_team_name=my_team_name,
         opp_team_name=opp_team_name,
         opponents_count=opponents_count,
-        opp_team_names=opp_team_names,
+        opp_team_names=parsed_names,
     )
     teams = build_draft_teams(config.myTeamName, config.oppTeamName, config.opponentsCount, opp_team_names=config.oppTeamNames)
     picks = get_room_picks(room_id)
