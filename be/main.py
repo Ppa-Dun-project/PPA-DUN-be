@@ -29,6 +29,12 @@ def _parse_cors_origins(raw_origins: str) -> list[str]:
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+# CORS 설정: 프론트엔드 개발 서버에서 백엔드 API에 요청할 수 있도록 허용 (프론트 주소에서 백 주소로 접근을 허용)
+# 그렇다고 해서 프론트의 VITE_API_BASE_URL가 필요 없는 것은 아님. 클라우드에 올리기 전까지는 프론트가 그렇게 설정해야 함.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_parse_cors_origins(settings.CORS_ORIGINS),
