@@ -483,23 +483,11 @@ def find_available_slot_index_with_occupied(
     slot_template: List[DraftPosition],
     occupied: Set[int],
 ) -> int:
-    first_util = -1
-    first_bench = -1
-
-    for i, slot in enumerate(slot_template):
+    # Position rule removed: assign the first open slot regardless of player position.
+    for i, _slot in enumerate(slot_template):
         if i in occupied:
             continue
-        if slot == desired_pos:
-            return i
-        if first_util == -1 and slot == "UTIL":
-            first_util = i
-        if first_bench == -1 and slot == "BENCH":
-            first_bench = i
-
-    if first_util != -1:
-        return first_util
-    if first_bench != -1:
-        return first_bench
+        return i
     return -1
 
 
@@ -696,11 +684,12 @@ def get_allowed_positions(
     picks = get_room_picks(room_id)
     occupied_by_team = get_occupied_slots_by_team(room_id, room_version, picks)
     team_occupied = occupied_by_team.get(team_id, set())
-    allowed_positions = [
-        pos
-        for pos in player.positions
-        if find_available_slot_index_with_occupied(pos, slot_template, team_occupied) != -1
-    ]
+    first_position = player.positions[0] if player.positions else "UTIL"
+    has_open_slot = (
+        find_available_slot_index_with_occupied(first_position, slot_template, team_occupied)
+        != -1
+    )
+    allowed_positions = list(player.positions) if has_open_slot else []
     ALLOWED_POSITIONS_CACHE[cache_key] = allowed_positions
 
     return DraftAllowedPositionsResponse(
@@ -722,8 +711,6 @@ def upsert_draft_pick(
     player = find_draft_player(payload.playerId)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
-    if payload.slotPos not in player.positions:
-        raise HTTPException(status_code=400, detail="Invalid slot position for player")
 
     picks = get_room_picks(room_id)
     next_picks = [p for p in picks if p.playerId != payload.playerId]
@@ -739,14 +726,16 @@ def upsert_draft_pick(
         occupied,
     )
     if resolved_slot_index == -1:
-        raise HTTPException(status_code=409, detail="No available slot for selected position")
+        raise HTTPException(status_code=409, detail="No available slot for team roster")
+
+    resolved_slot_pos = slot_template[resolved_slot_index]
 
     next_picks.append(
         DraftPickOut(
             playerId=payload.playerId,
             draftedByTeamId=payload.draftedByTeamId,
             slotIndex=resolved_slot_index,
-            slotPos=payload.slotPos,
+            slotPos=resolved_slot_pos,
             bid=payload.bid,
             type=payload.type,
         )
