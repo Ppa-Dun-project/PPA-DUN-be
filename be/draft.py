@@ -239,8 +239,6 @@ def build_draft_teams(
     for i in range(opponents_count):
         if i < len(names) and names[i].strip():
             name = names[i].strip()
-        elif i == 0:
-            name = opp_team_name or "Opponent 1"
         else:
             name = f"Opponent {i + 1}"
         team_id = "team-opp" if i == 0 else f"team-{i + 2}"
