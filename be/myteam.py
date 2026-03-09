@@ -3,6 +3,8 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
+from draft import DEFAULT_DRAFT_CONFIG, find_draft_player, get_room_picks
+
 # Used by My Team page data requests.
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
 
@@ -63,81 +65,6 @@ MyTeamSort = Literal[
     "sb_desc",
 ]
 
-MOCK_MY_TEAM_PLAYERS: List[MyTeamPlayerOut] = [
-    MyTeamPlayerOut(
-        id="p1",
-        name="Shohei Ohtani",
-        pos="DH",
-        cost=25,
-        team="LAA",
-        avg=0.394,
-        hr=54,
-        rbi=130,
-        sb=26,
-        ppaValue=9.2,
-    ),
-    MyTeamPlayerOut(
-        id="p2",
-        name="Aaron Judge",
-        pos="RF",
-        cost=12,
-        team="NYY",
-        avg=0.322,
-        hr=98,
-        rbi=144,
-        sb=3,
-        ppaValue=10.6,
-    ),
-    MyTeamPlayerOut(
-        id="p3",
-        name="Juan Soto",
-        pos="LF",
-        cost=75,
-        team="NYM",
-        avg=0.288,
-        hr=41,
-        rbi=109,
-        sb=7,
-        ppaValue=7.1,
-    ),
-    MyTeamPlayerOut(
-        id="p4",
-        name="Jose Ramirez",
-        pos="3B",
-        cost=11,
-        team="CLE",
-        avg=0.279,
-        hr=39,
-        rbi=118,
-        sb=20,
-        ppaValue=7.5,
-    ),
-    MyTeamPlayerOut(
-        id="p5",
-        name="Bobby Witt Jr.",
-        pos="SS",
-        cost=24,
-        team="KC",
-        avg=0.302,
-        hr=30,
-        rbi=103,
-        sb=49,
-        ppaValue=7.0,
-    ),
-    MyTeamPlayerOut(
-        id="p6",
-        name="Zack Wheeler",
-        pos="SP",
-        cost=34,
-        team="PHI",
-        avg=0.0,
-        hr=0,
-        rbi=0,
-        sb=0,
-        ppaValue=6.2,
-    ),
-]
-
 MY_TEAM_POSITIONS = [
     "ALL",
     "C",
@@ -145,12 +72,14 @@ MY_TEAM_POSITIONS = [
     "2B",
     "3B",
     "SS",
+    "OF",
+    "UTIL",
+    "SP",
+    "RP",
     "LF",
     "RF",
     "CF",
     "DH",
-    "SP",
-    "RP",
 ]
 
 MY_TEAM_SORT_OPTIONS: List[MyTeamSortOption] = [
@@ -164,7 +93,49 @@ MY_TEAM_SORT_OPTIONS: List[MyTeamSortOption] = [
     MyTeamSortOption(value="sb_desc", label="By SB"),
 ]
 
-TOTAL_BUDGET = 260
+def draft_pick_to_my_team_player(player_id: str, slot_pos: str, bid: Optional[int]) -> Optional[MyTeamPlayerOut]:
+    draft_player = find_draft_player(player_id)
+    if not draft_player:
+        return None
+
+    if slot_pos == "BENCH":
+        position = draft_player.positions[0] if draft_player.positions else "UTIL"
+    else:
+        position = slot_pos
+
+    resolved_cost = bid if isinstance(bid, int) else draft_player.recommendedBid
+
+    return MyTeamPlayerOut(
+        id=draft_player.id,
+        name=draft_player.name,
+        pos=position,
+        cost=max(0, int(resolved_cost)),
+        team=draft_player.team,
+        avg=float(draft_player.avg or 0.0),
+        hr=int(draft_player.hr or 0),
+        rbi=int(draft_player.rbi or 0),
+        sb=int(draft_player.sb or 0),
+        ppaValue=float(draft_player.ppaValue),
+    )
+
+
+def build_my_team_players(room_id: str, my_team_id: str) -> List[MyTeamPlayerOut]:
+    picks = get_room_picks(room_id)
+    mine = sorted(
+        (pick for pick in picks if pick.draftedByTeamId == my_team_id),
+        key=lambda pick: pick.slotIndex,
+    )
+
+    items: List[MyTeamPlayerOut] = []
+    for pick in mine:
+        mapped = draft_pick_to_my_team_player(
+            player_id=pick.playerId,
+            slot_pos=pick.slotPos,
+            bid=pick.bid,
+        )
+        if mapped:
+            items.append(mapped)
+    return items
 
 
 def sort_my_team(players: List[MyTeamPlayerOut], sort: MyTeamSort) -> List[MyTeamPlayerOut]:
@@ -187,10 +158,10 @@ def sort_my_team(players: List[MyTeamPlayerOut], sort: MyTeamSort) -> List[MyTea
     return players
 
 
-def get_budget_summary(players: List[MyTeamPlayerOut]) -> tuple[int, int, int]:
+def get_budget_summary(players: List[MyTeamPlayerOut], total_budget: int) -> tuple[int, int, int]:
     spent = sum(p.cost for p in players)
-    remaining = max(0, TOTAL_BUDGET - spent)
-    return TOTAL_BUDGET, spent, remaining
+    remaining = max(0, total_budget - spent)
+    return total_budget, spent, remaining
 
 
 # Used by MyTeamPage data table. Handles query/position/sort server-side.
@@ -201,12 +172,15 @@ def get_my_team_players(
     sort: MyTeamSort = Query(default="score_desc"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1),
+    room_id: str = Query(default="default", alias="roomId"),
+    my_team_id: str = Query(default="team-me", alias="myTeamId"),
 ):
+    source_players = build_my_team_players(room_id=room_id, my_team_id=my_team_id)
     keyword = (query or "").strip().lower()
     normalized_position = position.strip().upper()
 
     filtered = []
-    for player in MOCK_MY_TEAM_PLAYERS:
+    for player in source_players:
         matches_keyword = (
             not keyword
             or keyword in player.name.lower()
@@ -224,7 +198,10 @@ def get_my_team_players(
     end = start + limit
     paged = sorted_players[start:end]
 
-    total_budget, spent_budget, remaining_budget = get_budget_summary(MOCK_MY_TEAM_PLAYERS)
+    total_budget, spent_budget, remaining_budget = get_budget_summary(
+        source_players,
+        DEFAULT_DRAFT_CONFIG.budget,
+    )
     return MyTeamPlayersResponse(
         items=paged,
         page=safe_page,
@@ -251,11 +228,18 @@ def get_my_team_sort_options():
 
 # Used by MyTeamPage budget widget.
 @router.get("/summary", response_model=MyTeamSummaryResponse)
-def get_my_team_summary():
-    total_budget, spent_budget, remaining_budget = get_budget_summary(MOCK_MY_TEAM_PLAYERS)
+def get_my_team_summary(
+    room_id: str = Query(default="default", alias="roomId"),
+    my_team_id: str = Query(default="team-me", alias="myTeamId"),
+):
+    source_players = build_my_team_players(room_id=room_id, my_team_id=my_team_id)
+    total_budget, spent_budget, remaining_budget = get_budget_summary(
+        source_players,
+        DEFAULT_DRAFT_CONFIG.budget,
+    )
     return MyTeamSummaryResponse(
         totalBudget=total_budget,
         spentBudget=spent_budget,
         remainingBudget=remaining_budget,
-        playerCount=len(MOCK_MY_TEAM_PLAYERS),
+        playerCount=len(source_players),
     )
