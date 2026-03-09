@@ -10,7 +10,10 @@ _ENV_FILE = _BASE_DIR / ".env"
 class Settings(BaseSettings):
     APP_NAME: str = "My FastAPI"
     ENV: str = "dev"
-    CORS_ORIGINS: str = "http://localhost:5173"
+    CORS_ORIGINS: str = ""
+    EXTERNAL_API_BASE_URL: str = ""
+    EXTERNAL_API_KEY: str = ""
+    EXTERNAL_API_TIMEOUT_SECONDS: float = 5.0
 
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),

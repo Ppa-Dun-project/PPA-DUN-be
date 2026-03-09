@@ -1,10 +1,23 @@
+import logging
 from typing import Dict, List, Literal, Optional, Set, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from ppa_schemas import (
+    BatterBidRequestIn,
+    BatterStatsIn,
+    DraftContextIn,
+    LeagueContextIn,
+    PitcherBidRequestIn,
+    PitcherStatsIn,
+)
+from ppa_service import PpaAdapterService, PpaServiceError, get_ppa_adapter_service
+
+from core.config import settings
 
 # Used by Draft page APIs (config/filters/teams/players/picks).
 router = APIRouter(prefix="/api/draft", tags=["draft"])
+logger = logging.getLogger(__name__)
 
 DraftPosition = Literal["C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP", "BENCH"]
 DraftPositionFilter = Literal["ALL", "C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP"]
@@ -157,13 +170,20 @@ DEFAULT_DRAFT_CONFIG = DraftConfigOut(
     oppTeamNames=["Rivals", "Blue Sox", "City Sluggers", "Night Owls", "Harbor Aces"],
 )
 
-DEFAULT_OPPONENT_POOL = ["Blue Sox", "City Sluggers", "Night Owls", "Harbor Aces", "River Sharks", "Iron Bats"]
 
 # In-memory draft room state (replace with DB later).
 DRAFT_PICKS_BY_ROOM: Dict[str, List[DraftPickOut]] = {"default": []}
 ROOM_STATE_VERSION: Dict[str, int] = {"default": 0}
 ALLOWED_POSITIONS_CACHE: Dict[Tuple[str, int, str, str, int], List[DraftPosition]] = {}
 OCCUPIED_SLOTS_CACHE: Dict[Tuple[str, int], Dict[str, Set[int]]] = {}
+PLAYER_MARKET_CACHE: Dict[
+    Tuple[str, int, int, int, int, int, int, Tuple[str, ...]],
+    Tuple[int, float],
+] = {}
+PITCHER_POSITIONS: Set[str] = {"SP", "RP"}
+BATTER_POSITIONS: Set[str] = {"C", "1B", "2B", "3B", "SS", "OF", "DH"}
+DEFAULT_MY_TEAM_ID = "team-me"
+MAX_EXTERNAL_BID_CALLS_PER_REQUEST = 40
 
 SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "SP",
@@ -212,7 +232,7 @@ def build_draft_teams(my_team_name: str, opp_team_name: str, opponents_count: in
 
     teams.append(DraftTeamOut(id="team-opp", name=opp_team_name or "Opponent", isMine=False))
     for i in range(max(0, opponents_count - 1)):
-        fallback = DEFAULT_OPPONENT_POOL[i] if i < len(DEFAULT_OPPONENT_POOL) else f"Opponent {i + 2}"
+        fallback = f"Opponent {i + 2}"
         teams.append(DraftTeamOut(id=f"team-{i + 3}", name=fallback, isMine=False))
     return teams
 
@@ -236,6 +256,184 @@ def sort_draft_players(players: List[DraftPlayerOut], sort: DraftSort) -> List[D
     if sort == "sb_desc":
         return sorted(players, key=lambda p: numeric(p.sb), reverse=True)
     return players
+
+
+def is_external_bid_enabled() -> bool:
+    return bool(settings.EXTERNAL_API_BASE_URL and settings.EXTERNAL_API_KEY)
+
+
+def is_pitcher(player: DraftPlayerOut) -> bool:
+    return any(pos in PITCHER_POSITIONS for pos in player.positions)
+
+
+def to_external_position(player: DraftPlayerOut, pitcher: bool) -> str:
+    primary = player.positions[0] if player.positions else ("SP" if pitcher else "OF")
+    normalized = primary.upper()
+    if pitcher:
+        return "RP" if normalized == "RP" else "SP"
+    if normalized == "UTIL":
+        return "DH"
+    return normalized if normalized in BATTER_POSITIONS else "OF"
+
+
+def build_batter_stats(player: DraftPlayerOut) -> BatterStatsIn:
+    hr = max(0, int(player.hr or 0))
+    rbi = max(0, int(player.rbi or 0))
+    sb = max(0, int(player.sb or 0))
+    avg = float(player.avg or 0.250)
+    if avg <= 0:
+        avg = 0.250
+    runs = max(0, int(round((rbi * 0.55) + (hr * 0.8) + (sb * 0.3) + 30)))
+    caught_stealing = min(sb, max(0, int(round(sb * 0.25))))
+    return BatterStatsIn(
+        AB=550,
+        R=runs,
+        HR=hr,
+        RBI=rbi,
+        SB=sb,
+        CS=caught_stealing,
+        AVG=avg,
+    )
+
+
+def build_pitcher_stats(player: DraftPlayerOut) -> PitcherStatsIn:
+    # Keep payload generation independent from static ppaValue.
+    baseline_bid = max(1, int(player.recommendedBid or 1))
+    tier_scale = max(0.65, min(1.25, baseline_bid / 25.0))
+    is_relief = "RP" in player.positions
+    if is_relief:
+        ip = round(60.0 * tier_scale, 1)
+        wins = max(1, int(round(3 * tier_scale)))
+        saves = max(5, int(round(30 * tier_scale)))
+        strikeouts = max(35, int(round(80 * tier_scale)))
+        era = max(1.8, round(3.4 - ((tier_scale - 1.0) * 0.9), 2))
+        whip = max(0.85, round(1.12 - ((tier_scale - 1.0) * 0.16), 2))
+    else:
+        ip = round(170.0 * tier_scale, 1)
+        wins = max(3, int(round(11 * tier_scale)))
+        saves = 0
+        strikeouts = max(80, int(round(185 * tier_scale)))
+        era = max(2.2, round(3.8 - ((tier_scale - 1.0) * 0.9), 2))
+        whip = max(0.92, round(1.2 - ((tier_scale - 1.0) * 0.14), 2))
+    return PitcherStatsIn(
+        IP=ip,
+        W=wins,
+        SV=saves,
+        K=strikeouts,
+        ERA=era,
+        WHIP=whip,
+    )
+
+
+def build_league_context(
+    budget: int,
+    roster_slots: int,
+    opponents_count: int,
+) -> LeagueContextIn:
+    league_size = max(1, opponents_count + 1)
+    return LeagueContextIn(
+        leagueSize=league_size,
+        rosterSize=max(1, roster_slots),
+        totalBudget=max(1, budget * league_size),
+    )
+
+
+def build_draft_context(
+    room_id: str,
+    my_team_id: str,
+    budget: int,
+    roster_slots: int,
+) -> DraftContextIn:
+    picks = get_room_picks(room_id)
+    my_picks = [pick for pick in picks if pick.draftedByTeamId == my_team_id]
+    spent_budget = sum(pick.bid for pick in my_picks if isinstance(pick.bid, int))
+    return DraftContextIn(
+        myRemainingBudget=max(0, budget - spent_budget),
+        myRemainingRosterSpots=max(1, roster_slots - len(my_picks)),
+        myPositionsFilled=[pick.slotPos for pick in my_picks],
+        draftedPlayersCount=len(picks),
+    )
+
+
+def resolve_player_market_values(
+    player: DraftPlayerOut,
+    league_context: LeagueContextIn,
+    draft_context: DraftContextIn,
+    service: PpaAdapterService,
+) -> Tuple[int, float]:
+    cache_key = (
+        player.id,
+        league_context.leagueSize,
+        league_context.rosterSize,
+        league_context.totalBudget,
+        draft_context.myRemainingBudget,
+        draft_context.myRemainingRosterSpots,
+        draft_context.draftedPlayersCount,
+        tuple(draft_context.myPositionsFilled),
+    )
+    cached = PLAYER_MARKET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    pitcher = is_pitcher(player)
+    position = to_external_position(player, pitcher=pitcher)
+    try:
+        if pitcher:
+            payload = PitcherBidRequestIn(
+                playerName=player.name,
+                playerType="pitcher",
+                position=position,
+                stats=build_pitcher_stats(player),
+                leagueContext=league_context,
+                draftContext=draft_context,
+            )
+        else:
+            payload = BatterBidRequestIn(
+                playerName=player.name,
+                playerType="batter",
+                position=position,
+                stats=build_batter_stats(player),
+                leagueContext=league_context,
+                draftContext=draft_context,
+            )
+
+        response = service.calculate_player_bid(payload)
+        resolved_bid = max(1, int(getattr(response, "recommendedBid", player.recommendedBid)))
+        resolved_value = float(getattr(response, "playerValue", player.ppaValue))
+        resolved_pair = (resolved_bid, resolved_value)
+        PLAYER_MARKET_CACHE[cache_key] = resolved_pair
+        return resolved_pair
+    except PpaServiceError as exc:
+        logger.debug("Bid recommendation fallback for player=%s: %s", player.id, exc.detail)
+        return (player.recommendedBid, player.ppaValue)
+    except Exception:
+        logger.exception("Unexpected bid recommendation fallback for player=%s", player.id)
+        return (player.recommendedBid, player.ppaValue)
+
+
+def enrich_players_with_external_bid(
+    players: List[DraftPlayerOut],
+    league_context: LeagueContextIn,
+    draft_context: DraftContextIn,
+    service: PpaAdapterService,
+) -> List[DraftPlayerOut]:
+    enriched: List[DraftPlayerOut] = []
+    for player in players:
+        resolved_bid, resolved_value = resolve_player_market_values(
+            player=player,
+            league_context=league_context,
+            draft_context=draft_context,
+            service=service,
+        )
+        enriched.append(
+            player.model_copy(
+                update={
+                    "recommendedBid": resolved_bid,
+                    "ppaValue": resolved_value,
+                }
+            )
+        )
+    return enriched
 
 
 def get_room_version(room_id: str) -> int:
@@ -399,6 +597,12 @@ def get_draft_players(
     sort: DraftSort = Query(default="score_desc"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1),
+    room_id: str = Query(default="default", alias="roomId"),
+    my_team_id: str = Query(default=DEFAULT_MY_TEAM_ID, alias="myTeamId"),
+    budget: int = Query(default=DEFAULT_DRAFT_CONFIG.budget, ge=50, le=600),
+    roster_players: int = Query(default=DEFAULT_DRAFT_CONFIG.rosterPlayers, alias="rosterPlayers", ge=8, le=len(SLOT_TEMPLATE_BASE)),
+    opponents_count: int = Query(default=DEFAULT_DRAFT_CONFIG.opponentsCount, alias="opponentsCount", ge=0, le=12),
+    service: PpaAdapterService = Depends(get_ppa_adapter_service),
 ):
     keyword = (query or "").strip().lower()
     normalized_position = position.upper()
@@ -422,6 +626,31 @@ def get_draft_players(
     start = (safe_page - 1) * limit if total_pages > 0 else 0
     end = start + limit
     paged = sorted_players[start:end]
+
+    roster_slots = clamp_roster_slots(roster_players)
+    if is_external_bid_enabled() and paged:
+        league_context = build_league_context(
+            budget=budget,
+            roster_slots=roster_slots,
+            opponents_count=opponents_count,
+        )
+        draft_context = build_draft_context(
+            room_id=room_id,
+            my_team_id=my_team_id,
+            budget=budget,
+            roster_slots=roster_slots,
+        )
+        external_target = paged[:MAX_EXTERNAL_BID_CALLS_PER_REQUEST]
+        enriched = enrich_players_with_external_bid(
+            players=external_target,
+            league_context=league_context,
+            draft_context=draft_context,
+            service=service,
+        )
+        paged = enriched + paged[len(external_target):]
+
+        if sort in ("cost_desc", "cost_asc", "score_desc", "score_asc"):
+            paged = sort_draft_players(paged, sort)
 
     return DraftPlayerListResponse(
         items=paged,
