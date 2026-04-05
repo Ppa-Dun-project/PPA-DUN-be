@@ -33,12 +33,35 @@ jobs:
           docker push ${{ env.IMAGE }}:${{ github.sha }}
           docker push ${{ env.IMAGE }}:latest
 
-  notify:
+  update-helm:
     needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cloud repo
+        uses: actions/checkout@v4
+        with:
+          repository: Ppa-Dun-project/PPA-DUN-cloud
+          ref: infra/helm-chart-setup
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Update image tag
+        run: |
+          sed -i 's|tag: .*|tag: "${{ github.sha }}"|' helm/ppa-dun/values.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add helm/ppa-dun/values.yaml
+          git commit -m "deploy: update ppa-dun-be image to ${{ github.sha }}"
+          git push
+
+  notify:
+    needs: update-helm
     if: always()
     uses: ./.github/workflows/discord-deploy-notify.yml
     with:
-      status: ${{ needs.build-and-push.result }}
+      status: ${{ needs.update-helm.result }}
       service: Backend (Prod)
     secrets:
       DISCORD_DEPLOY_WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
