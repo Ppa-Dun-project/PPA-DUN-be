@@ -1,4 +1,4 @@
-name: Deploy Backend to Prod (MIG)
+name: Deploy Backend to Prod
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 env:
   GCP_REGION: us-east1
   IMAGE: us-east1-docker.pkg.dev/v1-mvp/be-prod/be
-  MIG_NAME: instance-group-1
 
 jobs:
   build-and-push:
@@ -34,29 +33,12 @@ jobs:
           docker push ${{ env.IMAGE }}:${{ github.sha }}
           docker push ${{ env.IMAGE }}:latest
 
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Rolling update MIG
-        run: |
-          gcloud compute instance-groups managed rolling-action restart ${{ env.MIG_NAME }} \
-            --region=${{ env.GCP_REGION }}
-
   notify:
-    needs: deploy
+    needs: build-and-push
     if: always()
     uses: ./.github/workflows/discord-deploy-notify.yml
     with:
-      status: ${{ needs.deploy.result }}
+      status: ${{ needs.build-and-push.result }}
       service: Backend (Prod)
     secrets:
       DISCORD_DEPLOY_WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
