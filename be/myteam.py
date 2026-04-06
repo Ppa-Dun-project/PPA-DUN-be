@@ -173,7 +173,7 @@ def get_my_team_players(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1),
     room_id: str = Query(default="default", alias="roomId"),
-    my_team_id: str = Query(default="team-me", alias="myTeamId"),
+    my_team_id: str = Query(default="team-0", alias="myTeamId"),
 ):
     source_players = build_my_team_players(room_id=room_id, my_team_id=my_team_id)
     keyword = (query or "").strip().lower()
@@ -230,7 +230,7 @@ def get_my_team_sort_options():
 @router.get("/summary", response_model=MyTeamSummaryResponse)
 def get_my_team_summary(
     room_id: str = Query(default="default", alias="roomId"),
-    my_team_id: str = Query(default="team-me", alias="myTeamId"),
+    my_team_id: str = Query(default="team-0", alias="myTeamId"),
 ):
     source_players = build_my_team_players(room_id=room_id, my_team_id=my_team_id)
     total_budget, spent_budget, remaining_budget = get_budget_summary(
