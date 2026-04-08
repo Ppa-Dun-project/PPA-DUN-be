@@ -27,7 +27,7 @@ def run_daily_update():
     # 1. Injuries
     try:
         logger.info("[1/3] Updating injuries...")
-        from injury import fetch_and_store as update_injuries
+        from be.database.injury import fetch_and_store as update_injuries
         update_injuries()
         results["injuries"] = "OK"
     except Exception as e:
@@ -37,7 +37,7 @@ def run_daily_update():
     # 2. Depth Charts
     try:
         logger.info("[2/3] Updating depth charts...")
-        from depth_charts import fetch_and_store as update_depth_charts
+        from be.database.depth_charts import fetch_and_store as update_depth_charts
         update_depth_charts()
         results["depth_charts"] = "OK"
     except Exception as e:
@@ -47,7 +47,7 @@ def run_daily_update():
     # 3. Transactions
     try:
         logger.info("[3/3] Updating transactions...")
-        from transactions import fetch_and_store as update_transactions
+        from be.database.transactions import fetch_and_store as update_transactions
         update_transactions()
         results["transactions"] = "OK"
     except Exception as e:
