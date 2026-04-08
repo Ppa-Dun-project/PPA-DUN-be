@@ -1,7 +1,21 @@
+import logging
+import os
+import re
 from typing import List, Literal, Optional
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+
+load_dotenv()
+DATABASE_URL = (
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+)
+engine = create_engine(DATABASE_URL)
+
+logger = logging.getLogger(__name__)
 
 # Used by Player pages. This router owns player list/detail/filter APIs.
 router = APIRouter(prefix="/api/players", tags=["players"])
@@ -9,14 +23,22 @@ router = APIRouter(prefix="/api/players", tags=["players"])
 
 # Used by PlayerDetail page. 선수의 상세 스탯 블록.
 class PlayerStats(BaseModel):
-    # 경기 수, 타석 수, 홈런 수, OPS (타자)
     g: int
     pa: int
     hr: int
     ops: float
-    
-    # 이닝 수 (투수)
     ip: float = 0.0
+    # 추가 타격 스탯
+    ab: int = 0
+    r: int = 0
+    h: int = 0
+    rbi: int = 0
+    bb: int = 0
+    k: int = 0
+    sb: int = 0
+    avg: float = 0.0
+    obp: float = 0.0
+    slg: float = 0.0
 
 # Used by PlayerDetail page. 선수 한명의 풀 데이터
 class PlayerOut(BaseModel):
@@ -30,7 +52,6 @@ class PlayerOut(BaseModel):
     team: str
     positions: List[str]
     valueScore: float
-    # 선수 사진 URL (선택적)
     headshotUrl: Optional[str] = None
     stats: PlayerStats
 
@@ -56,268 +77,162 @@ class PlayerListResponse(BaseModel):
 class PlayerPositionFiltersResponse(BaseModel):
     positions: List[str]
 
-# Used by PlayersToolbar sort dropdown. 
-# value_desc = ValueScore 내림차순, name_asc = 이름 오름차순 등
+# Used by PlayersToolbar sort dropdown.
 class PlayerSortOption(BaseModel):
     value: str
     label: str
 
-# Used by PlayersToolbar sort dropdown. 
-# 위에서 매칭된 정렬 옵션 목록 응답 형식
+# Used by PlayersToolbar sort dropdown.
 class PlayerSortFiltersResponse(BaseModel):
     sorts: List[PlayerSortOption]
 
 SortOrder = Literal["value_desc", "value_asc", "name_asc", "name_desc"]
 
-# Mock source for player list/detail (later replace with DB rows).
-MOCK_PLAYERS: List[PlayerOut] = [
-    PlayerOut(
-        id=1,
-        name="Aaron Judge",
-        age=33,
-        height_in=79,
-        weight_lb=282,
-        bats="R",
-        throws="R",
-        team="NYY",
-        positions=["OF"],
-        valueScore=98.2,
-        stats=PlayerStats(g=145, pa=650, hr=37, ops=0.980, ip=0.0),
-    ),
-    PlayerOut(
-        id=2,
-        name="Mookie Betts",
-        age=32,
-        height_in=70,
-        weight_lb=180,
-        bats="R",
-        throws="R",
-        team="LAD",
-        positions=["2B", "OF"],
-        valueScore=95.4,
-        stats=PlayerStats(g=148, pa=693, hr=39, ops=0.987, ip=0.0),
-    ),
-    PlayerOut(
-        id=3,
-        name="Shohei Ohtani",
-        age=30,
-        height_in=76,
-        weight_lb=210,
-        bats="L",
-        throws="R",
-        team="LAD",
-        positions=["DH", "SP"],
-        valueScore=99.5,
-        stats=PlayerStats(g=152, pa=701, hr=44, ops=1.021, ip=0.0),
-    ),
-    PlayerOut(
-        id=4,
-        name="Ronald Acuna Jr.",
-        age=27,
-        height_in=72,
-        weight_lb=205,
-        bats="R",
-        throws="R",
-        team="ATL",
-        positions=["OF"],
-        valueScore=96.8,
-        stats=PlayerStats(g=149, pa=710, hr=35, ops=0.944, ip=0.0),
-    ),
-    PlayerOut(
-        id=5,
-        name="Freddie Freeman",
-        age=35,
-        height_in=77,
-        weight_lb=220,
-        bats="L",
-        throws="R",
-        team="LAD",
-        positions=["1B"],
-        valueScore=94.6,
-        stats=PlayerStats(g=156, pa=721, hr=29, ops=0.931, ip=0.0),
-    ),
-    PlayerOut(
-        id=6,
-        name="Juan Soto",
-        age=26,
-        height_in=74,
-        weight_lb=224,
-        bats="L",
-        throws="L",
-        team="NYY",
-        positions=["OF"],
-        valueScore=97.1,
-        stats=PlayerStats(g=151, pa=702, hr=34, ops=0.978, ip=0.0),
-    ),
-    PlayerOut(
-        id=7,
-        name="Bobby Witt Jr.",
-        age=25,
-        height_in=73,
-        weight_lb=200,
-        bats="R",
-        throws="R",
-        team="KC",
-        positions=["SS"],
-        valueScore=93.9,
-        stats=PlayerStats(g=158, pa=725, hr=31, ops=0.911, ip=0.0),
-    ),
-    PlayerOut(
-        id=8,
-        name="Corey Seager",
-        age=31,
-        height_in=76,
-        weight_lb=215,
-        bats="L",
-        throws="R",
-        team="TEX",
-        positions=["SS"],
-        valueScore=91.7,
-        stats=PlayerStats(g=138, pa=602, hr=33, ops=0.946, ip=0.0),
-    ),
-    PlayerOut(
-        id=9,
-        name="Jose Ramirez",
-        age=32,
-        height_in=69,
-        weight_lb=190,
-        bats="S",
-        throws="R",
-        team="CLE",
-        positions=["3B"],
-        valueScore=90.8,
-        stats=PlayerStats(g=154, pa=677, hr=28, ops=0.872, ip=0.0),
-    ),
-    PlayerOut(
-        id=10,
-        name="Adley Rutschman",
-        age=27,
-        height_in=74,
-        weight_lb=230,
-        bats="S",
-        throws="R",
-        team="BAL",
-        positions=["C"],
-        valueScore=85.6,
-        stats=PlayerStats(g=143, pa=635, hr=24, ops=0.821, ip=0.0),
-    ),
-    PlayerOut(
-        id=11,
-        name="Gerrit Cole",
-        age=34,
-        height_in=76,
-        weight_lb=220,
-        bats="R",
-        throws="R",
-        team="NYY",
-        positions=["SP"],
-        valueScore=92.4,
-        stats=PlayerStats(g=32, pa=0, hr=0, ops=0.000, ip=198.2),
-    ),
-    PlayerOut(
-        id=12,
-        name="Zack Wheeler",
-        age=35,
-        height_in=76,
-        weight_lb=195,
-        bats="L",
-        throws="R",
-        team="PHI",
-        positions=["SP"],
-        valueScore=89.1,
-        stats=PlayerStats(g=33, pa=0, hr=0, ops=0.000, ip=205.1),
-    ),
-    PlayerOut(
-        id=13,
-        name="Corbin Burnes",
-        age=30,
-        height_in=75,
-        weight_lb=245,
-        bats="R",
-        throws="R",
-        team="BAL",
-        positions=["SP"],
-        valueScore=88.3,
-        stats=PlayerStats(g=31, pa=0, hr=0, ops=0.000, ip=193.0),
-    ),
-    PlayerOut(
-        id=14,
-        name="Emmanuel Clase",
-        age=27,
-        height_in=74,
-        weight_lb=215,
-        bats="R",
-        throws="R",
-        team="CLE",
-        positions=["RP"],
-        valueScore=83.5,
-        stats=PlayerStats(g=71, pa=0, hr=0, ops=0.000, ip=72.1),
-    ),
-    PlayerOut(
-        id=15,
-        name="Josh Hader",
-        age=31,
-        height_in=75,
-        weight_lb=195,
-        bats="L",
-        throws="L",
-        team="HOU",
-        positions=["RP"],
-        valueScore=81.9,
-        stats=PlayerStats(g=66, pa=0, hr=0, ops=0.000, ip=64.2),
-    ),
-]
-
 # Used by PlayersToolbar position chips.
-MOCK_PLAYER_POSITION_FILTERS: List[str] = ["ALL", "C", "1B", "2B", "3B", "SS", "OF", "P", "DH"]
+PLAYER_POSITION_FILTERS: List[str] = ["ALL", "C", "1B", "2B", "3B", "SS", "OF", "P", "DH"]
 
 # Used by PlayersToolbar sort dropdown.
-# 드롭다운 옵션 추가하고 싶으면 여기에 하면 됨
-MOCK_PLAYER_SORT_OPTIONS: List[PlayerSortOption] = [
+PLAYER_SORT_OPTIONS: List[PlayerSortOption] = [
     PlayerSortOption(value="value_desc", label="ValueScore (high -> low)"),
     PlayerSortOption(value="value_asc", label="ValueScore (low -> high)"),
     PlayerSortOption(value="name_asc", label="Name (A -> Z)"),
     PlayerSortOption(value="name_desc", label="Name (Z -> A)"),
 ]
 
+# DB 포지션 → UI 필터 매핑 (LF, CF, RF → OF)
+POSITION_TO_FILTER = {
+    "LF": "OF", "CF": "OF", "RF": "OF",
+    "TWP": "P", "IF": "SS",
+}
 
-def sort_players(players: List[PlayerOut], sort: SortOrder) -> List[PlayerOut]:
-    if sort == "value_desc":
-        return sorted(players, key=lambda p: p.valueScore, reverse=True)
-    if sort == "value_asc":
-        return sorted(players, key=lambda p: p.valueScore)
+
+def parse_height_to_inches(height_str: str) -> int:
+    """'6\\' 0\"' 형식을 인치로 변환"""
+    match = re.match(r"(\d+)'\s*(\d+)\"?", height_str or "")
+    if match:
+        return int(match.group(1)) * 12 + int(match.group(2))
+    return 0
+
+
+def build_position_filter_sql(position: str) -> str:
+    """포지션 필터에 맞는 SQL WHERE 절 반환"""
+    if position == "ALL":
+        return ""
+    if position == "P":
+        return "AND p.position IN ('P', 'TWP')"
+    if position == "OF":
+        return "AND p.position IN ('OF', 'LF', 'CF', 'RF')"
+    return "AND p.position = :position"
+
+
+def build_sort_sql(sort: SortOrder) -> str:
+    """정렬 기준 SQL ORDER BY 절 반환 (FPTS 기반 valueScore 정렬 지원)"""
     if sort == "name_asc":
-        return sorted(players, key=lambda p: p.name.lower())
+        return "ORDER BY p.full_name ASC"
     if sort == "name_desc":
-        return sorted(players, key=lambda p: p.name.lower(), reverse=True)
-    return players
+        return "ORDER BY p.full_name DESC"
+    if sort == "value_desc":
+        return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+    if sort == "value_asc":
+        return "ORDER BY COALESCE(s.FPTS, 0) ASC, p.full_name ASC"
+    return "ORDER BY p.full_name ASC"
 
-# 선수 포지션이 현재 필터 조건과 맞는지 검사
-def matches_position_filter(player_positions: List[str], normalized_position: str) -> bool:
-    # 대문자로 통일
-    normalized = {pos.upper() for pos in player_positions}
-    if normalized_position == "ALL":
-        return True
-    
-    # Supports UI filter "P" while preserving SP/RP data in records.
-    if normalized_position == "P":
-        return bool(normalized.intersection({"P", "SP", "RP"}))
-    return normalized_position in normalized
+
+def row_to_player_list_item(row) -> PlayerListItem:
+    """DB row를 PlayerListItem 모델로 변환"""
+    r = row._mapping
+    raw_pos = r["position"] or "DH"
+    display_pos = POSITION_TO_FILTER.get(raw_pos, raw_pos)
+    fpts = r.get("FPTS") or 0
+
+    return PlayerListItem(
+        id=r["player_id"],
+        name=r["full_name"],
+        team=r["abbreviation"] or "",
+        positions=[display_pos],
+        valueScore=round(float(fpts), 1),
+        headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
+    )
+
+
+def row_to_player_out(row) -> PlayerOut:
+    """DB row를 PlayerOut 모델로 변환 (상세 스탯 포함)"""
+    r = row._mapping
+    raw_pos = r["position"] or "DH"
+    display_pos = POSITION_TO_FILTER.get(raw_pos, raw_pos)
+
+    ab = r.get("AB") or 0
+    bb = r.get("BB") or 0
+    hr = r.get("HR") or 0
+    obp = r.get("OBP") or 0.0
+    slg = r.get("SLG") or 0.0
+    fpts = r.get("FPTS") or 0
+
+    return PlayerOut(
+        id=r["player_id"],
+        name=r["full_name"],
+        age=r["current_age"] or 0,
+        height_in=parse_height_to_inches(r["height"]),
+        weight_lb=r["weight"] or 0,
+        bats=r["bat_side"] or "R",
+        throws=r["pitch_hand"] or "R",
+        team=r["abbreviation"] or "",
+        positions=[display_pos],
+        valueScore=round(float(fpts), 1),
+        headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
+        stats=PlayerStats(
+            g=0,
+            pa=ab + bb,
+            hr=hr,
+            ops=round(obp + slg, 3),
+            ip=0.0,
+            ab=ab,
+            r=r.get("R") or 0,
+            h=r.get("H") or 0,
+            rbi=r.get("RBI") or 0,
+            bb=bb,
+            k=r.get("K") or 0,
+            sb=r.get("SB") or 0,
+            avg=round(float(r.get("AVG") or 0), 3),
+            obp=round(float(obp), 3),
+            slg=round(float(slg), 3),
+        ),
+    )
+
+
+# 공통 JOIN 쿼리 베이스 (선수 + 팀 + 스탯)
+BASE_QUERY = """
+    FROM mlb_players_list p
+    LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
+    LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+    WHERE p.active = 1
+"""
+
+# 리스트용 SELECT (스탯 테이블에서 FPTS만)
+LIST_SELECT = """
+    SELECT p.player_id, p.full_name, p.current_age, p.height, p.weight,
+           p.bat_side, p.pitch_hand, p.position, t.abbreviation,
+           s.FPTS
+"""
+
+# 상세용 SELECT (스탯 테이블 전체)
+DETAIL_SELECT = """
+    SELECT p.*, t.abbreviation,
+           s.AB, s.R, s.H, s.HR, s.RBI, s.BB, s.K, s.SB,
+           s.AVG, s.OBP, s.SLG, s.FPTS
+"""
 
 
 # Used by PlayersToolbar. Returns all available player positions.
-# 위에서 정한, 포지션 칩 옵션 제공 api.
-# 만약에 포지션을 더 추가하고 싶으면 여기 추가 하면 됨.
 @router.get("/filters/positions", response_model=PlayerPositionFiltersResponse)
 def get_player_position_filters():
-    return PlayerPositionFiltersResponse(positions=MOCK_PLAYER_POSITION_FILTERS)
+    return PlayerPositionFiltersResponse(positions=PLAYER_POSITION_FILTERS)
 
 
 # Used by PlayersToolbar. Returns all available sort options.
-# 위에서 정한, 드롭다운에 표시할 정렬 옵션 제공 api.
 @router.get("/filters/sorts", response_model=PlayerSortFiltersResponse)
 def get_player_sort_options():
-    return PlayerSortFiltersResponse(sorts=MOCK_PLAYER_SORT_OPTIONS)
+    return PlayerSortFiltersResponse(sorts=PLAYER_SORT_OPTIONS)
 
 
 # Used by player list page. Supports query/position/sort + pagination.
@@ -332,37 +247,44 @@ def get_players(
     keyword = (query or "").strip().lower()
     normalized_position = position.strip().upper()
 
-    filtered = []
-    for player in MOCK_PLAYERS:
-        matches_keyword = (
-            not keyword
-            or keyword in player.name.lower()
-            or keyword in player.team.lower()
-        )
-        if matches_keyword and matches_position_filter(player.positions, normalized_position):
-            filtered.append(player)
+    where_parts = []
+    params = {}
 
-    sorted_players = sort_players(filtered, sort)
-    total = len(sorted_players)
+    if keyword:
+        where_parts.append(
+            "(LOWER(p.full_name) LIKE :keyword OR LOWER(t.abbreviation) LIKE :keyword)"
+        )
+        params["keyword"] = f"%{keyword}%"
+
+    pos_sql = build_position_filter_sql(normalized_position)
+    if pos_sql and ":position" in pos_sql:
+        params["position"] = normalized_position
+
+    extra_where = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+    sort_sql = build_sort_sql(sort)
+
+    count_sql = f"SELECT COUNT(*) {BASE_QUERY} {extra_where} {pos_sql}"
+    with engine.connect() as conn:
+        total = conn.execute(text(count_sql), params).scalar()
+
     total_pages = (total + limit - 1) // limit if total > 0 else 0
     safe_page = min(page, total_pages) if total_pages > 0 else 1
+    offset = (safe_page - 1) * limit if total_pages > 0 else 0
 
-    start = (safe_page - 1) * limit if total_pages > 0 else 0
-    end = start + limit
-    paged = sorted_players[start:end]
+    data_sql = f"""
+        {LIST_SELECT}
+        {BASE_QUERY} {extra_where} {pos_sql}
+        {sort_sql}
+        LIMIT :limit OFFSET :offset
+    """
+    params["limit"] = limit
+    params["offset"] = offset
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(data_sql), params).fetchall()
 
     return PlayerListResponse(
-        items=[
-            PlayerListItem(
-                id=p.id,
-                name=p.name,
-                team=p.team,
-                positions=p.positions,
-                valueScore=p.valueScore,
-                headshotUrl=p.headshotUrl,
-            )
-            for p in paged
-        ],
+        items=[row_to_player_list_item(r) for r in rows],
         page=safe_page,
         limit=limit,
         total=total,
@@ -373,7 +295,67 @@ def get_players(
 # Used by PlayerDetail page.
 @router.get("/{player_id}", response_model=PlayerOut)
 def get_player_detail(player_id: int):
-    for player in MOCK_PLAYERS:
-        if player.id == player_id:
-            return player
-    raise HTTPException(status_code=404, detail="Player not found")
+    detail_sql = f"""
+        {DETAIL_SELECT}
+        {BASE_QUERY} AND p.player_id = :player_id
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text(detail_sql), {"player_id": player_id}).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    return row_to_player_out(row)
+
+
+# 프론트엔드 PlayerInfoModal에서 호출하는 valueScore 전용 엔드포인트.
+# PPA 외부 API를 통해 실제 playerValue를 계산하여 반환한다.
+class PlayerValueResponse(BaseModel):
+    playerId: int
+    name: str
+    valueScore: float
+
+
+@router.get("/{player_id}/value", response_model=PlayerValueResponse)
+def get_player_value(player_id: int):
+    detail_sql = f"""
+        {DETAIL_SELECT}
+        {BASE_QUERY} AND p.player_id = :player_id
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text(detail_sql), {"player_id": player_id}).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    player = row_to_player_out(row)
+
+    # PPA API로 진짜 valueScore 계산
+    try:
+        from ppa_api.ppa_service import PpaAdapterService
+        from ppa_api.ppa_schemas import (
+            BatterValueRequestIn, BatterStatsIn, LeagueContextIn,
+        )
+
+        svc = PpaAdapterService.from_settings()
+        payload = BatterValueRequestIn(
+            playerName=player.name,
+            playerType="batter",
+            position=player.positions[0],
+            stats=BatterStatsIn(
+                AB=player.stats.ab, R=player.stats.r, HR=player.stats.hr,
+                RBI=player.stats.rbi, SB=player.stats.sb, CS=0, AVG=player.stats.avg,
+            ),
+            leagueContext=LeagueContextIn(leagueSize=6, rosterSize=23, totalBudget=260),
+        )
+        result = svc.calculate_player_value(payload)
+        value_score = round(result.playerValue, 1)
+    except Exception as e:
+        logger.warning(f"PPA API call failed for {player.name}: {e}")
+        value_score = player.valueScore  # FPTS fallback
+
+    return PlayerValueResponse(
+        playerId=player.id,
+        name=player.name,
+        valueScore=value_score,
+    )

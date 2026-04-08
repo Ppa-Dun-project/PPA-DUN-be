@@ -2,7 +2,7 @@
 from home import router as home_router
 
 from myteam import router as myteam_router
-from ppa_router import router as ppa_router
+from ppa_api.ppa_router import router as ppa_router
 from players import router as players_router
 
 from core.config import settings
