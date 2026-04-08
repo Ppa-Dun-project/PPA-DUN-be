@@ -3,7 +3,7 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from draft import DEFAULT_DRAFT_CONFIG, find_draft_player, get_room_picks
+from draft import DEFAULT_DRAFT_CONFIG, find_draft_player, get_user_picks
 
 # Used by My Team page data requests.
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
@@ -120,7 +120,7 @@ def draft_pick_to_my_team_player(player_id: str, slot_pos: str, bid: Optional[in
 
 
 def build_my_team_players(room_id: str, my_team_id: str) -> List[MyTeamPlayerOut]:
-    picks = get_room_picks(room_id)
+    picks = get_user_picks(room_id)
     mine = sorted(
         (pick for pick in picks if pick.draftedByTeamId == my_team_id),
         key=lambda pick: pick.slotIndex,

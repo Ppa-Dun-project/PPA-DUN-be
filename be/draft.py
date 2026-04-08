@@ -3,7 +3,9 @@ from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from ppa_schemas import (
+from sqlalchemy import text as sa_text
+
+from ppa_api.ppa_schemas import (
     BatterBidRequestIn,
     BatterStatsIn,
     DraftContextIn,
@@ -11,7 +13,7 @@ from ppa_schemas import (
     PitcherBidRequestIn,
     PitcherStatsIn,
 )
-from ppa_service import PpaAdapterService, PpaServiceError, get_ppa_adapter_service
+from ppa_api.ppa_service import PpaAdapterService, PpaServiceError, get_ppa_adapter_service
 
 from core.config import settings
 
@@ -117,24 +119,75 @@ class DraftBootstrapResponse(BaseModel):
     picks: List[DraftPickOut]
 
 
-# Draft mock source (later replace with DB tables).
-MOCK_DRAFT_PLAYERS: List[DraftPlayerOut] = [
-    DraftPlayerOut(id="1", name="Shohei Ohtani", positions=["UTIL"], recommendedBid=52, team="LAD", avg=0.304, hr=44, rbi=95, sb=28, ppaValue=99.2),
-    DraftPlayerOut(id="2", name="Mookie Betts", positions=["OF"], recommendedBid=41, team="LAD", avg=0.289, hr=35, rbi=97, sb=17, ppaValue=93.8),
-    DraftPlayerOut(id="3", name="Bobby Witt Jr.", positions=["SS"], recommendedBid=45, team="KC", avg=0.282, hr=31, rbi=97, sb=49, ppaValue=96.1),
-    DraftPlayerOut(id="4", name="Aaron Judge", positions=["OF"], recommendedBid=44, team="NYY", avg=0.271, hr=50, rbi=118, sb=8, ppaValue=95.0),
-    DraftPlayerOut(id="5", name="Freddie Freeman", positions=["1B"], recommendedBid=37, team="LAD", avg=0.308, hr=28, rbi=101, sb=16, ppaValue=90.7),
-    DraftPlayerOut(id="6", name="Jose Ramirez", positions=["3B"], recommendedBid=36, team="CLE", avg=0.279, hr=31, rbi=102, sb=27, ppaValue=90.1),
-    DraftPlayerOut(id="7", name="Francisco Lindor", positions=["SS"], recommendedBid=33, team="NYM", avg=0.271, hr=26, rbi=88, sb=29, ppaValue=86.4),
-    DraftPlayerOut(id="8", name="Adley Rutschman", positions=["C"], recommendedBid=18, team="BAL", avg=0.268, hr=21, rbi=79, sb=2, ppaValue=72.2),
-    DraftPlayerOut(id="9", name="Marcus Semien", positions=["2B"], recommendedBid=24, team="TEX", avg=0.274, hr=24, rbi=90, sb=14, ppaValue=79.5),
-    DraftPlayerOut(id="10", name="Corey Seager", positions=["SS"], recommendedBid=31, team="TEX", avg=0.301, hr=33, rbi=97, sb=2, ppaValue=84.3),
-    DraftPlayerOut(id="11", name="Juan Soto", positions=["OF"], recommendedBid=39, team="NYY", avg=0.288, hr=37, rbi=104, sb=9, ppaValue=91.7),
-    DraftPlayerOut(id="12", name="Corbin Burnes", positions=["SP"], recommendedBid=28, team="BAL", avg=0.0, hr=0, rbi=0, sb=0, ppaValue=83.1),
-    DraftPlayerOut(id="13", name="Zack Wheeler", positions=["SP"], recommendedBid=26, team="PHI", avg=0.0, hr=0, rbi=0, sb=0, ppaValue=81.9),
-    DraftPlayerOut(id="14", name="Edwin Diaz", positions=["RP"], recommendedBid=16, team="NYM", avg=0.0, hr=0, rbi=0, sb=0, ppaValue=70.0),
-    DraftPlayerOut(id="15", name="Josh Hader", positions=["RP"], recommendedBid=15, team="HOU", avg=0.0, hr=0, rbi=0, sb=0, ppaValue=68.9),
-]
+# DB 포지션 → 드래프트 포지션 매핑
+_DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
+    "C": "C", "1B": "1B", "2B": "2B", "3B": "3B", "SS": "SS",
+    "OF": "OF", "LF": "OF", "CF": "OF", "RF": "OF",
+    "DH": "UTIL", "TWP": "UTIL", "IF": "SS",
+    "P": "SP",
+}
+
+# DB에서 드래프트 포지션 필터용 SQL 조건을 생성
+def _draft_position_filter_sql(position: str) -> str:
+    if position == "ALL":
+        return ""
+    if position == "SP":
+        return "AND p.position = 'P'"
+    if position == "RP":
+        return "AND p.position = 'P'"
+    if position == "OF":
+        return "AND p.position IN ('OF','LF','CF','RF')"
+    if position == "UTIL":
+        return ""  # UTIL은 모든 선수 가능
+    return f"AND p.position = :position"
+
+# DB에서 드래프트 정렬용 SQL ORDER BY를 생성
+def _draft_sort_sql(sort: str) -> str:
+    if sort == "score_desc":
+        return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+    if sort == "score_asc":
+        return "ORDER BY COALESCE(s.FPTS, 0) ASC, p.full_name ASC"
+    if sort == "avg_desc":
+        return "ORDER BY COALESCE(s.AVG, 0) DESC, p.full_name ASC"
+    if sort == "hr_desc":
+        return "ORDER BY COALESCE(s.HR, 0) DESC, p.full_name ASC"
+    if sort == "rbi_desc":
+        return "ORDER BY COALESCE(s.RBI, 0) DESC, p.full_name ASC"
+    if sort == "sb_desc":
+        return "ORDER BY COALESCE(s.SB, 0) DESC, p.full_name ASC"
+    # cost_desc, cost_asc → PPA API enrichment 후 Python에서 정렬
+    return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+
+
+_DRAFT_BASE_QUERY = """
+    FROM mlb_players_list p
+    LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
+    LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+    WHERE p.active = 1
+"""
+
+
+def _row_to_draft_player(row) -> DraftPlayerOut:
+    """DB row를 DraftPlayerOut으로 변환한다."""
+    r = row._mapping
+    raw_pos = r["position"] or "DH"
+    draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL")
+    fpts = float(r.get("FPTS") or 0)
+    # recommendedBid: FPTS 기반 임시 추정 (PPA API enrichment에서 덮어씀)
+    estimated_bid = max(1, int(fpts / 35)) if fpts > 0 else 1
+
+    return DraftPlayerOut(
+        id=str(r["player_id"]),
+        name=r["full_name"],
+        positions=[draft_pos],
+        recommendedBid=estimated_bid,
+        team=r["abbreviation"] or "",
+        avg=round(float(r.get("AVG") or 0), 3) or None,
+        hr=int(r.get("HR") or 0) or None,
+        rbi=int(r.get("RBI") or 0) or None,
+        sb=int(r.get("SB") or 0) or None,
+        ppaValue=round(fpts, 1),
+    )
 
 MOCK_DRAFT_POSITION_FILTERS: List[DraftPositionFilter] = [
     "ALL",
@@ -468,10 +521,18 @@ def get_user_picks(user_id: str) -> List[DraftPickOut]:
 
 
 def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:
-    for player in MOCK_DRAFT_PLAYERS:
-        if player.id == player_id:
-            return player
-    return None
+    """DB에서 player_id로 선수 1명을 조회한다."""
+    from database.draft_store import engine
+    sql = sa_text(f"""
+        SELECT p.player_id, p.full_name, p.position, t.abbreviation,
+               s.AVG, s.HR, s.RBI, s.SB, s.FPTS
+        {_DRAFT_BASE_QUERY} AND p.player_id = :player_id
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"player_id": int(player_id)}).fetchone()
+    if not row:
+        return None
+    return _row_to_draft_player(row)
 
 
 def clamp_roster_slots(roster_players: Optional[int]) -> int:
@@ -602,28 +663,52 @@ def get_draft_players(
     opponents_count: int = Query(default=DEFAULT_DRAFT_CONFIG.opponentsCount, alias="opponentsCount", ge=0, le=12),
     service: PpaAdapterService = Depends(get_ppa_adapter_service),
 ):
+    from database.draft_store import engine
+
     keyword = (query or "").strip().lower()
     normalized_position = position.upper()
 
-    filtered = []
-    for player in MOCK_DRAFT_PLAYERS:
-        matches_keyword = (
-            not keyword
-            or keyword in player.name.lower()
-            or keyword in player.team.lower()
-            or any(keyword in pos.lower() for pos in player.positions)
-        )
-        matches_position = normalized_position == "ALL" or normalized_position in player.positions
-        if matches_keyword and matches_position:
-            filtered.append(player)
+    # WHERE 조건 조립
+    where_parts = []
+    params: Dict = {}
 
-    sorted_players = sort_draft_players(filtered, sort)
-    total = len(sorted_players)
+    if keyword:
+        where_parts.append(
+            "(LOWER(p.full_name) LIKE :keyword OR LOWER(t.abbreviation) LIKE :keyword)"
+        )
+        params["keyword"] = f"%{keyword}%"
+
+    pos_sql = _draft_position_filter_sql(normalized_position)
+    if pos_sql and ":position" in pos_sql:
+        params["position"] = normalized_position
+
+    extra_where = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+    sort_sql = _draft_sort_sql(sort)
+
+    # COUNT
+    count_sql = sa_text(f"SELECT COUNT(*) {_DRAFT_BASE_QUERY} {extra_where} {pos_sql}")
+    with engine.connect() as conn:
+        total = conn.execute(count_sql, params).scalar()
+
     total_pages = (total + limit - 1) // limit if total > 0 else 0
     safe_page = min(page, total_pages) if total_pages > 0 else 1
-    start = (safe_page - 1) * limit if total_pages > 0 else 0
-    end = start + limit
-    paged = sorted_players[start:end]
+    offset = (safe_page - 1) * limit if total_pages > 0 else 0
+
+    # DATA
+    data_sql = sa_text(f"""
+        SELECT p.player_id, p.full_name, p.position, t.abbreviation,
+               s.AVG, s.HR, s.RBI, s.SB, s.FPTS
+        {_DRAFT_BASE_QUERY} {extra_where} {pos_sql}
+        {sort_sql}
+        LIMIT :limit OFFSET :offset
+    """)
+    params["limit"] = limit
+    params["offset"] = offset
+
+    with engine.connect() as conn:
+        rows = conn.execute(data_sql, params).fetchall()
+
+    paged = [_row_to_draft_player(r) for r in rows]
 
     roster_slots = clamp_roster_slots(roster_players)
     if is_external_bid_enabled() and paged:
