@@ -1,14 +1,17 @@
+# 외부 PPA API 호출을 감싸는 서비스 계층(어댑터) 모듈.
+# ppa_client의 저수준 HTTP 호출을 ppa_schemas의 타입 안전한 모델로 변환하며, 에러 매핑을 담당한다.
+# bid 요청 시 타임아웃 발생 시 1회 자동 재시도 로직을 포함한다.
 from pydantic import ValidationError
 
 from core.config import settings
-from ppa_client import (
+from ppa_api.ppa_client import (
     ExternalApiConfigError,
     ExternalApiHttpError,
     ExternalApiInvalidResponseError,
     ExternalApiNetworkError,
     PpaExternalApiClient,
 )
-from ppa_schemas import (
+from ppa_api.ppa_schemas import (
     BidRequestIn,
     HealthResponseOut,
     PlayerBidResponseOut,

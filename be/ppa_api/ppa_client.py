@@ -1,3 +1,6 @@
+# 외부 PPA 평가 API와 HTTP 통신을 수행하는 저수준 클라이언트 모듈.
+# urllib 기반으로 health, player/value, player/bid 엔드포인트를 호출한다.
+# HTTP 에러, 네트워크 타임아웃, 잘못된 응답 등 다양한 예외 클래스를 정의하여 상위 계층에서 처리할 수 있게 한다.
 import json
 import socket
 from typing import Any
