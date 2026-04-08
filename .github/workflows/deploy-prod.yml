@@ -1,4 +1,4 @@
-name: Deploy Backend to Prod (MIG)
+name: Deploy Backend to Prod
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 env:
   GCP_REGION: us-east1
   IMAGE: us-east1-docker.pkg.dev/v1-mvp/be-prod/be
-  MIG_NAME: instance-group-1
 
 jobs:
   build-and-push:
@@ -34,29 +33,35 @@ jobs:
           docker push ${{ env.IMAGE }}:${{ github.sha }}
           docker push ${{ env.IMAGE }}:latest
 
-  deploy:
+  update-helm:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+      - name: Checkout cloud repo
+        uses: actions/checkout@v4
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          repository: Ppa-Dun-project/PPA-DUN-cloud
+          ref: infra/helm-chart-setup
+          token: ${{ secrets.GH_PAT }}
 
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Rolling update MIG
+      - name: Update image tag
         run: |
-          gcloud compute instance-groups managed rolling-action restart ${{ env.MIG_NAME }} \
-            --region=${{ env.GCP_REGION }}
+          sed -i '/ppaDunBe:/,/port:/ s|tag: .*|tag: "${{ github.sha }}"|' helm/ppa-dun/values.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add helm/ppa-dun/values.yaml
+          git commit -m "deploy: update ppa-dun-be image to ${{ github.sha }}"
+          git push
 
   notify:
-    needs: deploy
+    needs: update-helm
     if: always()
     uses: ./.github/workflows/discord-deploy-notify.yml
     with:
-      status: ${{ needs.deploy.result }}
+      status: ${{ needs.update-helm.result }}
       service: Backend (Prod)
     secrets:
       DISCORD_DEPLOY_WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
