@@ -1,8 +1,18 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+
+load_dotenv()
+DATABASE_URL = (
+    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+)
+_engine = create_engine(DATABASE_URL)
 
 # Used by Home page sections (news/top players).
 router = APIRouter(prefix="/api", tags=["home"])
@@ -69,12 +79,38 @@ MOCK_NEWS_TEMPLATE = [
     ),
 ]
 
-MOCK_TOP_PLAYERS: List[TopPlayerOut] = [
-    TopPlayerOut(id="p1", name="Aaron Judge", team="NYY", positions=["OF"], valueScore=98.2),
-    TopPlayerOut(id="p2", name="Mookie Betts", team="LAD", positions=["2B", "OF"], valueScore=95.4),
-    TopPlayerOut(id="p3", name="Shohei Ohtani", team="LAD", positions=["DH"], valueScore=94.7),
-    TopPlayerOut(id="p4", name="Gerrit Cole", team="NYY", positions=["P"], valueScore=92.1),
-]
+_DB_POS_TO_DRAFT = {
+    "C": "C", "1B": "1B", "2B": "2B", "3B": "3B", "SS": "SS",
+    "LF": "OF", "RF": "OF", "CF": "OF", "OF": "OF",
+    "P": "SP", "SP": "SP", "RP": "RP",
+    "DH": "DH", "TWP": "DH", "IF": "UTIL",
+}
+
+
+def get_top_players_from_db(limit: int) -> List[TopPlayerOut]:
+    """player_ppa_scores 테이블에서 valueScore 상위 선수를 조회한다."""
+    sql = text("""
+        SELECT player_id, player_name, team, position, value_score
+        FROM player_ppa_scores
+        WHERE value_score > 0
+        ORDER BY value_score DESC
+        LIMIT :limit
+    """)
+    with _engine.connect() as conn:
+        rows = conn.execute(sql, {"limit": limit}).fetchall()
+
+    results: List[TopPlayerOut] = []
+    for row in rows:
+        r = row._mapping
+        pos = _DB_POS_TO_DRAFT.get((r["position"] or "DH").upper(), "UTIL")
+        results.append(TopPlayerOut(
+            id=str(r["player_id"]),
+            name=r["player_name"],
+            team=r["team"] or "",
+            positions=[pos],
+            valueScore=round(float(r["value_score"]), 1),
+        ))
+    return results
 
 
 def build_mock_news() -> List[NewsItemOut]:
@@ -102,7 +138,8 @@ def get_news(limit: int = Query(default=3, ge=1, le=20)):
 # Used by potential home ranking panel.
 @router.get("/top-players", response_model=TopPlayersResponse)
 def get_top_players(limit: int = Query(default=4, ge=1, le=50)):
-    return TopPlayersResponse(items=MOCK_TOP_PLAYERS[:limit], total=len(MOCK_TOP_PLAYERS))
+    players = get_top_players_from_db(limit)
+    return TopPlayersResponse(items=players, total=len(players))
 
 
 # Used when frontend wants one-call bootstrap for Home page.
@@ -112,5 +149,5 @@ def get_home_dashboard(
     top_players_limit: int = Query(default=4, ge=1, le=50),
 ):
     news = build_mock_news()[:news_limit]
-    top_players = MOCK_TOP_PLAYERS[:top_players_limit]
+    top_players = get_top_players_from_db(top_players_limit)
     return HomeDashboardResponse(news=news, topPlayers=top_players)
