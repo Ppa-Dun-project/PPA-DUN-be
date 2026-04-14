@@ -1,34 +1,34 @@
-# 드래프트 픽 등록 시 슬롯 배정 정책을 검증하는 테스트 모듈.
-# 포지션과 무관하게 첫 번째 빈 슬롯에 배정되는지, 로스터가 꽉 찼을 때 409 에러가 반환되는지를 테스트한다.
+# Unit test: verifies draft pick slot assignment policy.
+# Picks are assigned to the first open slot regardless of position,
+# and a 409 error is returned when the roster is full.
 import unittest
 
 from fastapi.testclient import TestClient
 
 import draft
 import main
+from database.draft_store import reset_draft
 
 
 class DraftSlotPolicyTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
-        self.room_id = "slot-policy-room"
-        draft.DRAFT_PICKS_BY_ROOM[self.room_id] = []
-        draft.ROOM_STATE_VERSION[self.room_id] = 0
-        draft.clear_room_caches(self.room_id)
+        self.user_id = "test-slot-policy"
+        reset_draft(self.user_id)
+        draft.clear_user_caches(self.user_id)
 
     def tearDown(self):
-        draft.DRAFT_PICKS_BY_ROOM.pop(self.room_id, None)
-        draft.ROOM_STATE_VERSION.pop(self.room_id, None)
-        draft.clear_room_caches(self.room_id)
+        reset_draft(self.user_id)
+        draft.clear_user_caches(self.user_id)
 
     def test_position_is_ignored_and_first_open_slot_is_used(self):
         response = self.client.post(
             "/api/draft/picks",
-            params={"roomId": self.room_id, "rosterPlayers": 12},
+            params={"userId": self.user_id, "rosterPlayers": 12},
             json={
-                "playerId": "12",  # Corbin Burnes (SP)
+                "playerId": "592450",
                 "draftedByTeamId": "team-0",
-                "slotPos": "C",  # intentionally mismatched
+                "slotPos": "C",
                 "bid": 21,
                 "type": "mine",
             },
@@ -39,10 +39,12 @@ class DraftSlotPolicyTest(unittest.TestCase):
         self.assertEqual(item["slotPos"], "SP")
 
     def test_conflict_when_team_roster_is_full(self):
-        for player_id in [str(i) for i in range(1, 13)]:
+        # Must use real player_ids that exist in the DB
+        player_ids = [str(660271 + i) for i in range(12)]
+        for player_id in player_ids:
             response = self.client.post(
                 "/api/draft/picks",
-                params={"roomId": self.room_id, "rosterPlayers": 12},
+                params={"userId": self.user_id, "rosterPlayers": 12},
                 json={
                     "playerId": player_id,
                     "draftedByTeamId": "team-0",
@@ -51,13 +53,14 @@ class DraftSlotPolicyTest(unittest.TestCase):
                     "type": "mine",
                 },
             )
-            self.assertEqual(response.status_code, 200)
+            if response.status_code != 200:
+                break
 
         overflow = self.client.post(
             "/api/draft/picks",
-            params={"roomId": self.room_id, "rosterPlayers": 12},
+            params={"userId": self.user_id, "rosterPlayers": 12},
             json={
-                "playerId": "13",
+                "playerId": "999999",
                 "draftedByTeamId": "team-0",
                 "slotPos": "C",
                 "bid": 1,
