@@ -225,12 +225,10 @@ DEFAULT_DRAFT_CONFIG = DraftConfigOut(
 from database.draft_store import (
     ensure_draft_tables,
     save_draft_config,
-    load_draft_config,
     load_draft_picks,
     upsert_draft_pick,
     delete_draft_pick,
     reset_draft,
-    save_all_picks,
 )
 ensure_draft_tables()
 
@@ -278,7 +276,7 @@ def clamp_int(value: Optional[int], min_value: int, max_value: int, fallback: in
 # opp_team_names: user-provided opponent names (auto-generated if empty)
 def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_count: int) -> List[DraftTeamOut]:
     teams: List[DraftTeamOut] = [
-        DraftTeamOut(id="team-0", name=my_team_name or "My Team", isMine=True)
+        DraftTeamOut(id=DEFAULT_MY_TEAM_ID, name=my_team_name or "My Team", isMine=True)
     ]
     for i in range(max(0, opponents_count)):
         name = opp_team_names[i] if i < len(opp_team_names) and opp_team_names[i] else f"Opponent {i + 1}"
@@ -286,25 +284,6 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
     return teams
 
 
-def sort_draft_players(players: List[DraftPlayerOut], sort: DraftSort) -> List[DraftPlayerOut]:
-    numeric = lambda value: value if value is not None else -1
-    if sort == "score_desc":
-        return sorted(players, key=lambda p: p.ppaValue, reverse=True)
-    if sort == "score_asc":
-        return sorted(players, key=lambda p: p.ppaValue)
-    if sort == "cost_desc":
-        return sorted(players, key=lambda p: p.recommendedBid, reverse=True)
-    if sort == "cost_asc":
-        return sorted(players, key=lambda p: p.recommendedBid)
-    if sort == "avg_desc":
-        return sorted(players, key=lambda p: numeric(p.avg), reverse=True)
-    if sort == "hr_desc":
-        return sorted(players, key=lambda p: numeric(p.hr), reverse=True)
-    if sort == "rbi_desc":
-        return sorted(players, key=lambda p: numeric(p.rbi), reverse=True)
-    if sort == "sb_desc":
-        return sorted(players, key=lambda p: numeric(p.sb), reverse=True)
-    return players
 
 
 
@@ -371,15 +350,6 @@ def find_available_slot_index_with_occupied(
         return i
     return -1
 
-
-def find_available_slot_index(
-    team_id: str,
-    desired_pos: DraftPosition,
-    slot_template: List[DraftPosition],
-    picks: List[DraftPickOut],
-) -> int:
-    occupied = {pick.slotIndex for pick in picks if pick.draftedByTeamId == team_id}
-    return find_available_slot_index_with_occupied(desired_pos, slot_template, occupied)
 
 
 def get_occupied_slots_by_team(
