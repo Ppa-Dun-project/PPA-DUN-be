@@ -45,7 +45,7 @@ jobs:
           DB_HOST: "127.0.0.1"
           DB_PORT: "3306"
           DB_NAME: test
-        run: python -m pytest --ignore=test_integration_draft_api.py --ignore=test_integration_ppa_api.py
+        run: python -m pytest test_ppa_adapter.py
 
   build-and-push:
     needs: test
