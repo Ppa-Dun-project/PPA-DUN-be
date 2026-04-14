@@ -126,15 +126,15 @@ def build_position_filter_sql(position: str) -> str:
 
 
 def build_sort_sql(sort: SortOrder) -> str:
-    """정렬 기준 SQL ORDER BY 절 반환 (FPTS 기반 valueScore 정렬 지원)"""
+    """정렬 기준 SQL ORDER BY 절 반환 (PPA valueScore 정렬 지원)"""
     if sort == "name_asc":
         return "ORDER BY p.full_name ASC"
     if sort == "name_desc":
         return "ORDER BY p.full_name DESC"
     if sort == "value_desc":
-        return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
     if sort == "value_asc":
-        return "ORDER BY COALESCE(s.FPTS, 0) ASC, p.full_name ASC"
+        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
     return "ORDER BY p.full_name ASC"
 
 
@@ -143,14 +143,13 @@ def row_to_player_list_item(row) -> PlayerListItem:
     r = row._mapping
     raw_pos = r["position"] or "DH"
     display_pos = POSITION_TO_FILTER.get(raw_pos, raw_pos)
-    fpts = r.get("FPTS") or 0
 
     return PlayerListItem(
         id=r["player_id"],
         name=r["full_name"],
         team=r["abbreviation"] or "",
         positions=[display_pos],
-        valueScore=round(float(fpts), 1),
+        valueScore=round(float(r.get("value_score") or 0), 1),
         headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
     )
 
@@ -166,7 +165,6 @@ def row_to_player_out(row) -> PlayerOut:
     hr = r.get("HR") or 0
     obp = r.get("OBP") or 0.0
     slg = r.get("SLG") or 0.0
-    fpts = r.get("FPTS") or 0
 
     return PlayerOut(
         id=r["player_id"],
@@ -178,7 +176,7 @@ def row_to_player_out(row) -> PlayerOut:
         throws=r["pitch_hand"] or "R",
         team=r["abbreviation"] or "",
         positions=[display_pos],
-        valueScore=round(float(fpts), 1),
+        valueScore=round(float(r.get("value_score") or 0), 1),
         headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
         stats=PlayerStats(
             g=0,
@@ -200,26 +198,27 @@ def row_to_player_out(row) -> PlayerOut:
     )
 
 
-# 공통 JOIN 쿼리 베이스 (선수 + 팀 + 스탯)
+# 공통 JOIN 쿼리 베이스 (선수 + 팀 + 스탯 + PPA 스코어)
 BASE_QUERY = """
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+    LEFT JOIN player_ppa_scores ppa ON p.player_id = ppa.player_id
     WHERE p.active = 1
 """
 
-# 리스트용 SELECT (스탯 테이블에서 FPTS만)
+# 리스트용 SELECT (PPA valueScore 포함)
 LIST_SELECT = """
     SELECT p.player_id, p.full_name, p.current_age, p.height, p.weight,
            p.bat_side, p.pitch_hand, p.position, t.abbreviation,
-           s.FPTS
+           ppa.value_score
 """
 
-# 상세용 SELECT (스탯 테이블 전체)
+# 상세용 SELECT (스탯 + PPA valueScore)
 DETAIL_SELECT = """
     SELECT p.*, t.abbreviation,
            s.AB, s.R, s.H, s.HR, s.RBI, s.BB, s.K, s.SB,
-           s.AVG, s.OBP, s.SLG, s.FPTS
+           s.AVG, s.OBP, s.SLG, ppa.value_score
 """
 
 
@@ -318,44 +317,20 @@ class PlayerValueResponse(BaseModel):
 
 @router.get("/{player_id}/value", response_model=PlayerValueResponse)
 def get_player_value(player_id: int):
-    detail_sql = f"""
-        {DETAIL_SELECT}
-        {BASE_QUERY} AND p.player_id = :player_id
-    """
+    # player_ppa_scores 테이블에서 PPA API가 계산한 valueScore를 조회한다.
+    ppa_sql = text("""
+        SELECT player_name, value_score
+        FROM player_ppa_scores
+        WHERE player_id = :player_id
+    """)
     with engine.connect() as conn:
-        row = conn.execute(text(detail_sql), {"player_id": player_id}).fetchone()
+        row = conn.execute(ppa_sql, {"player_id": player_id}).fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    player = row_to_player_out(row)
-
-    # PPA API로 진짜 valueScore 계산
-    try:
-        from ppa_api.ppa_service import PpaAdapterService
-        from ppa_api.ppa_schemas import (
-            BatterValueRequestIn, BatterStatsIn, LeagueContextIn,
-        )
-
-        svc = PpaAdapterService.from_settings()
-        payload = BatterValueRequestIn(
-            playerName=player.name,
-            playerType="batter",
-            position=player.positions[0],
-            stats=BatterStatsIn(
-                AB=player.stats.ab, R=player.stats.r, HR=player.stats.hr,
-                RBI=player.stats.rbi, SB=player.stats.sb, CS=0, AVG=player.stats.avg,
-            ),
-            leagueContext=LeagueContextIn(leagueSize=6, rosterSize=23, totalBudget=260),
-        )
-        result = svc.calculate_player_value(payload)
-        value_score = round(result.playerValue, 1)
-    except Exception as e:
-        logger.warning(f"PPA API call failed for {player.name}: {e}")
-        value_score = player.valueScore  # FPTS fallback
+        raise HTTPException(status_code=404, detail="Player PPA score not found")
 
     return PlayerValueResponse(
-        playerId=player.id,
-        name=player.name,
-        valueScore=value_score,
+        playerId=player_id,
+        name=row._mapping["player_name"],
+        valueScore=round(float(row._mapping["value_score"]), 1),
     )
