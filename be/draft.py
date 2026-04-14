@@ -683,8 +683,7 @@ def get_draft_bootstrap(
 # Resets user's entire draft (config + all picks deleted).
 @router.delete("/reset", response_model=dict)
 def reset_draft_endpoint(
-    user_id: str = Query(default="default", alias="userId"),
-):
+    user_id: str = Query(default="default", alias="userId"),):
     reset_draft(user_id)
     clear_user_caches(user_id)
     return {"status": "ok", "userId": user_id}
