@@ -155,3 +155,43 @@ CREATE TABLE IF NOT EXISTS `draft_picks` (
     UNIQUE KEY `uq_user_player` (`user_id`, `player_id`),
     KEY `idx_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 8. players_stats_nl_2025 — 2025 시즌 선수 스탯 (타격 통계)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `players_stats_nl_2025` (
+    `Player`  VARCHAR(100)  DEFAULT NULL,
+    `AB`      INT           DEFAULT NULL,
+    `R`       INT           DEFAULT NULL,
+    `H`       INT           DEFAULT NULL,
+    `1B`      INT           DEFAULT NULL,
+    `2B`      INT           DEFAULT NULL,
+    `3B`      INT           DEFAULT NULL,
+    `HR`      INT           DEFAULT NULL,
+    `RBI`     INT           DEFAULT NULL,
+    `BB`      INT           DEFAULT NULL,
+    `K`       INT           DEFAULT NULL,
+    `SB`      INT           DEFAULT NULL,
+    `CS`      INT           DEFAULT NULL,
+    `AVG`     FLOAT         DEFAULT NULL,
+    `OBP`     FLOAT         DEFAULT NULL,
+    `SLG`     FLOAT         DEFAULT NULL,
+    `FPTS`    INT           DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 9. player_ppa_scores — PPA 가치 점수 및 추천 입찰가
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `player_ppa_scores` (
+    `id`              INT           NOT NULL AUTO_INCREMENT,
+    `player_id`       INT           DEFAULT NULL,
+    `player_name`     VARCHAR(255)  DEFAULT NULL,
+    `team`            VARCHAR(255)  DEFAULT NULL,
+    `position`        VARCHAR(10)   DEFAULT NULL,
+    `value_score`     FLOAT         DEFAULT NULL,
+    `recommended_bid` INT           DEFAULT NULL,
+    `updated_at`      DATETIME      DEFAULT NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uq_player_id` (`player_id`),
+    KEY `idx_player_id` (`player_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
