@@ -1,7 +1,7 @@
-# ppa_scores.py — 전체 선수의 PPA valueScore와 recommendedBid를 계산하여 DB에 저장하는 스크립트.
-# ppa_api/ppa_service.py를 통해 외부 API와 소통한다 (직접 호출하지 않음).
-# 사용법: python -m database.ppa_scores
-# 주기적으로 실행하여 player_ppa_scores 테이블을 갱신한다.
+# Batch script that calculates PPA value_score and recommended_bid for all players
+# and stores them in the player_ppa_scores table.
+# Communicates with the external API through ppa_api/ppa_service.py (not directly).
+# Run periodically to refresh scores: python -m database.ppa_value_bid
 import os
 import sys
 from datetime import datetime
@@ -16,7 +16,7 @@ DATABASE_URL = (
 )
 engine = create_engine(DATABASE_URL)
 
-# ppa_api는 be/ 디렉토리에 있으므로 path 추가
+# Add parent directory to path so ppa_api imports work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ppa_api.ppa_service import PpaAdapterService, PpaServiceError
 from ppa_api.ppa_schemas import (
@@ -42,12 +42,12 @@ DEFAULT_DRAFT_CONTEXT = DraftContextIn(
 
 
 def _load_all_players():
-    """DB에서 active 선수 전체를 AL + NL 스탯과 함께 로드한다."""
+    """Loads all active players from DB with AL + NL stats."""
     players = []
     seen_ids = set()
 
     with engine.connect() as conn:
-        # AL stats (이름 직접 매칭)
+        # AL stats (direct name match)
         al_rows = conn.execute(text("""
             SELECT p.player_id, p.full_name, p.position, t.abbreviation,
                    s.batting_average AS AVG, s.home_runs AS HR,
@@ -64,7 +64,7 @@ def _load_all_players():
                 seen_ids.add(pid)
                 players.append(row)
 
-        # NL stats (Player 컬럼에서 이름 추출)
+        # NL stats (extract name from Player column)
         nl_rows = conn.execute(text("""
             SELECT p.player_id, p.full_name, p.position, t.abbreviation,
                    n.AVG, n.HR, n.RBI, n.SB
@@ -92,7 +92,7 @@ def _load_all_players():
 
 
 def _build_batter_bid_request(name, position, stats):
-    """타자용 BatterBidRequestIn을 생성한다."""
+    """Builds a BatterBidRequestIn payload for a batter."""
     hr = max(0, int(stats.get("HR") or 0))
     rbi = max(0, int(stats.get("RBI") or 0))
     sb = max(0, int(stats.get("SB") or 0))
@@ -119,7 +119,7 @@ def _build_batter_bid_request(name, position, stats):
 
 
 def _build_pitcher_bid_request(name, position):
-    """투수용 PitcherBidRequestIn을 생성한다."""
+    """Builds a PitcherBidRequestIn payload for a pitcher."""
     pos = "RP" if position.upper() == "RP" else "SP"
     return PitcherBidRequestIn(
         playerName=name,
@@ -132,11 +132,11 @@ def _build_pitcher_bid_request(name, position):
 
 
 def fetch_and_store():
-    """전체 선수를 PpaAdapterService를 통해 계산하고 DB에 저장한다."""
+    """Calculates scores for all players via PpaAdapterService and stores in DB."""
     service = PpaAdapterService.from_settings()
 
     rows = _load_all_players()
-    print(f"총 {len(rows)}명 선수를 PPA API로 전송합니다...")
+    print(f"Sending {len(rows)} players to PPA API...")
 
     now = datetime.utcnow()
     success = 0
@@ -198,7 +198,7 @@ def fetch_and_store():
 
         conn.commit()
 
-    print(f"완료: 성공 {success}명, 실패 {fail}명")
+    print(f"Done: {success} succeeded, {fail} failed")
 
 
 if __name__ == "__main__":

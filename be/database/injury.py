@@ -1,4 +1,4 @@
-# scrape_injuries.py
+# Fetches MLB injury data from ESPN API/HTML and stores it in the mlb_injuries table.
 import os
 import logging
 import requests
@@ -28,7 +28,7 @@ ESPN_HTML_URL = "https://www.espn.com/mlb/injuries"
 
 
 # ──────────────────────────────────────
-# 1) 메인: ESPN JSON API
+# 1) Primary: ESPN JSON API
 # ──────────────────────────────────────
 def fetch_from_api() -> list[dict]:
     response = requests.get(ESPN_API_URL, timeout=10)
@@ -62,7 +62,7 @@ def fetch_from_api() -> list[dict]:
 
 
 # ──────────────────────────────────────
-# 2) Fallback: Selenium HTML 스크래핑
+# 2) Fallback: Selenium HTML scraping
 # ──────────────────────────────────────
 def fetch_from_html() -> list[dict]:
     from selenium import webdriver
@@ -159,7 +159,7 @@ def ensure_table():
             Column("fetched_at", String(30)),
         )
         metadata.create_all(engine)
-        print("테이블 생성 완료: mlb_injuries")
+        print("Table created: mlb_injuries")
 
 
 def save_to_db(rows: list[dict], source: str):
@@ -191,39 +191,39 @@ def save_to_db(rows: list[dict], source: str):
 
 
 # ──────────────────────────────────────
-# 메인: API → 실패 시 HTML fallback
+# Main: API -> falls back to HTML scraping on failure
 # ──────────────────────────────────────
 def fetch_and_store():
-    # 1차: JSON API
+    # 1st attempt: JSON API
     try:
         rows = fetch_from_api()
         if rows:
             save_to_db(rows, source="api")
-            logging.info(f"API 성공: {len(rows)}명")
-            print(f"[API] 저장/업데이트 완료: {len(rows)}명 부상자")
+            logging.info(f"API success: {len(rows)} players")
+            print(f"[API] Saved/updated: {len(rows)} injured players")
             return
         else:
-            raise ValueError("API 응답은 성공했으나 데이터가 비어있음")
+            raise ValueError("API responded successfully but returned empty data")
 
     except Exception as e:
-        logging.warning(f"API 실패: {e} → HTML fallback 전환")
-        print(f"[API 실패] {e}")
-        print("[HTML fallback] Selenium으로 전환...")
+        logging.warning(f"API failed: {e} -> switching to HTML fallback")
+        print(f"[API failed] {e}")
+        print("[HTML fallback] Switching to Selenium...")
 
-    # 2차: HTML 스크래핑
+    # 2nd attempt: HTML scraping
     try:
         rows = fetch_from_html()
         if rows:
             save_to_db(rows, source="html")
-            logging.info(f"HTML fallback 성공: {len(rows)}명")
-            print(f"[HTML] 저장/업데이트 완료: {len(rows)}명 부상자")
+            logging.info(f"HTML fallback success: {len(rows)} players")
+            print(f"[HTML] Saved/updated: {len(rows)} injured players")
         else:
-            logging.error("HTML fallback도 데이터 없음")
-            print("[HTML] 데이터 없음")
+            logging.error("HTML fallback also returned no data")
+            print("[HTML] No data found")
 
     except Exception as e:
-        logging.error(f"HTML fallback도 실패: {e}")
-        print(f"[HTML 실패] {e}")
+        logging.error(f"HTML fallback also failed: {e}")
+        print(f"[HTML failed] {e}")
 
 
 if __name__ == "__main__":

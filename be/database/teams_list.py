@@ -1,4 +1,4 @@
-# fetch_teams.py
+# Fetches MLB team data from statsapi.mlb.com and stores it in the mlb_team_list table.
 import requests
 import os
 from dotenv import load_dotenv
@@ -64,7 +64,7 @@ def ensure_table():
             Column("active", Integer),
         )
         metadata.create_all(engine)
-        print("테이블 생성 완료: mlb_team_list")
+        print("Table created: mlb_team_list")
 
 
 def fetch_and_store():
@@ -96,7 +96,7 @@ def fetch_and_store():
         conn.execute(sql, rows)
         conn.commit()
 
-    print(f"저장/업데이트 완료: {len(rows)}팀")
+    print(f"Saved/updated: {len(rows)} teams")
 
 
 if __name__ == "__main__":

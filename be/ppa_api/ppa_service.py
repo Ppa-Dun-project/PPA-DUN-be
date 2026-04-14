@@ -1,6 +1,7 @@
-# 외부 PPA API 호출을 감싸는 서비스 계층(어댑터) 모듈.
-# ppa_client의 저수준 HTTP 호출을 ppa_schemas의 타입 안전한 모델로 변환하며, 에러 매핑을 담당한다.
-# bid 요청 시 타임아웃 발생 시 1회 자동 재시도 로직을 포함한다.
+# Service adapter layer wrapping the external PPA API.
+# Converts ppa_client's raw HTTP calls into type-safe ppa_schemas models,
+# maps external errors to internal HTTP status codes (e.g. 401->502, timeout->504),
+# and retries bid requests once on transient timeout.
 from pydantic import ValidationError
 
 from core.config import settings

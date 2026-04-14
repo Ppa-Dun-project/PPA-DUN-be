@@ -1,4 +1,7 @@
-﻿from draft import router as draft_router
+﻿# FastAPI application entry point.
+# Registers all page routers (draft, home, myteam, players, ppa) and
+# configures CORS middleware so the frontend dev server can reach the backend.
+from draft import router as draft_router
 from home import router as home_router
 
 from myteam import router as myteam_router
@@ -34,8 +37,8 @@ def _parse_cors_origins(raw_origins: str) -> list[str]:
 def health():
     return {"ok": True}
 
-# CORS 설정: 프론트엔드 개발 서버에서 백엔드 API에 요청할 수 있도록 허용 (프론트 주소에서 백 주소로 접근을 허용)
-# 그렇다고 해서 프론트의 VITE_API_BASE_URL가 필요 없는 것은 아님. 클라우드에 올리기 전까지는 프론트가 그렇게 설정해야 함.
+# CORS: allows the frontend dev server to reach the backend API.
+# The frontend still needs VITE_API_BASE_URL configured until cloud deployment.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_parse_cors_origins(settings.CORS_ORIGINS),

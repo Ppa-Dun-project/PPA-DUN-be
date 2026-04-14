@@ -1,4 +1,4 @@
-# scrape_depth_charts.py  (ESPN source)
+# Scrapes team depth charts from ESPN and stores them in the mlb_depth_charts table.
 import os
 import re
 import time
@@ -62,15 +62,15 @@ HEADERS = {
     )
 }
 
-# ESPN depth chart 포지션 순서 (Table 0 기준)
+# ESPN depth chart position order (based on Table 0)
 POSITIONS = ["P", "RP", "CL", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH"]
 
-# depth order 컬럼 헤더
+# Depth order column headers
 DEPTH_LABELS = ["Starter", "2nd", "3rd", "4th", "5th"]
 
 
 def scrape_team_depth_chart(team_slug: str, team_name: str) -> list[dict]:
-    """ESPN depth chart 페이지에서 팀 데이터를 스크랩합니다."""
+    """Scrapes depth chart data for a single team from ESPN."""
     url = BASE_URL.format(team=team_slug)
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
@@ -78,18 +78,18 @@ def scrape_team_depth_chart(team_slug: str, team_name: str) -> list[dict]:
 
     tables = soup.find_all("table")
     if len(tables) < 2:
-        print(f"    [WARN] {team_slug}: 테이블을 찾을 수 없음")
+        print(f"    [WARN] {team_slug}: table not found")
         return []
 
-    # Table 0: 포지션 라벨 (P, RP, CL, C, ...)
-    # Table 1: 선수 데이터 (Starter, 2nd, 3rd, ...)
+    # Table 0: position labels (P, RP, CL, C, ...)
+    # Table 1: player data (Starter, 2nd, 3rd, ...)
     pos_table = tables[0]
     data_table = tables[1]
 
     pos_rows = pos_table.find_all("tr")
     data_rows = data_table.find_all("tr")
 
-    # 첫 번째 row는 헤더이므로 skip
+    # Skip first row (header)
     pos_cells = [r.find(["td", "th"]) for r in pos_rows[1:]]
     positions = [c.get_text(strip=True) for c in pos_cells if c]
 
@@ -105,7 +105,7 @@ def scrape_team_depth_chart(team_slug: str, team_name: str) -> list[dict]:
             if not cell_text or cell_text == "-":
                 continue
 
-            # 선수 링크에서 이름과 ESPN ID 추출
+            # Extract player name and ESPN ID from link
             link = cell.find("a", href=True)
             if not link:
                 continue
@@ -117,7 +117,7 @@ def scrape_team_depth_chart(team_slug: str, team_name: str) -> list[dict]:
             if id_match:
                 espn_id = int(id_match.group(1))
 
-            # 부상 상태 추출
+            # Extract injury status
             injury_status = None
             injury_span = cell.find("span", class_="nfl-injuries-status")
             if injury_span:
@@ -159,21 +159,21 @@ def ensure_table():
             ))
             conn.commit()
 
-        print("테이블 생성 완료: mlb_depth_charts")
+        print("Table created: mlb_depth_charts")
     else:
-        # 기존 테이블에 새 칼럼이 없으면 추가
+        # Add missing columns to existing table
         columns = [col["name"] for col in inspector.get_columns("mlb_depth_charts")]
         with engine.connect() as conn:
             if "espn_player_id" not in columns:
                 conn.execute(text(
                     "ALTER TABLE mlb_depth_charts ADD COLUMN `espn_player_id` INT NULL"
                 ))
-                print("칼럼 추가: espn_player_id")
+                print("Column added: espn_player_id")
             if "injury_status" not in columns:
                 conn.execute(text(
                     "ALTER TABLE mlb_depth_charts ADD COLUMN `injury_status` VARCHAR(10) NULL"
                 ))
-                print("칼럼 추가: injury_status")
+                print("Column added: injury_status")
             conn.commit()
 
 
@@ -185,16 +185,16 @@ def fetch_and_store():
         try:
             team_rows = scrape_team_depth_chart(slug, name)
             all_rows.extend(team_rows)
-            print(f"  {name}: {len(team_rows)}명")
+            print(f"  {name}: {len(team_rows)} players")
             time.sleep(2)
         except Exception as e:
-            print(f"  {name}: 실패 - {e}")
+            print(f"  {name}: failed - {e}")
 
     if not all_rows:
-        print("데이터 없음")
+        print("No data found")
         return
 
-    # 기존 데이터 삭제 후 새로 삽입 (전체 갱신)
+    # Delete existing data and insert fresh (full refresh)
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM mlb_depth_charts"))
         conn.commit()
@@ -211,7 +211,7 @@ def fetch_and_store():
         conn.execute(sql, all_rows)
         conn.commit()
 
-    print(f"\n저장 완료: 총 {len(all_rows)}명")
+    print(f"\nSaved: {len(all_rows)} players total")
 
 
 if __name__ == "__main__":

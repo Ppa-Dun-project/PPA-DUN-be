@@ -1,4 +1,4 @@
-# fetch_and_store.py
+# Fetches MLB player roster from statsapi.mlb.com and stores it in the mlb_players_list table.
 import requests
 import json
 from sqlalchemy import create_engine, inspect, text, MetaData, Table, Column, Integer, String, Text
@@ -17,7 +17,7 @@ API_URL = "https://statsapi.mlb.com/api/v1/sports/1/players?season=2025"
 
 
 def flatten_player(player: dict) -> dict:
-    """중첩 JSON을 flat한 컬럼 구조로 변환"""
+    """Flattens nested API JSON into a flat column structure."""
     return {
         "player_id": player.get("id"),
         "full_name": player.get("fullName"),
@@ -42,7 +42,7 @@ def flatten_player(player: dict) -> dict:
 
 
 def create_players_table():
-    """players 테이블 없으면 생성"""
+    """Creates the mlb_players table if it doesn't exist."""
     inspector = inspect(engine)
     if not inspector.has_table("mlb_players"):
         table = Table(
@@ -69,11 +69,11 @@ def create_players_table():
             Column("active", Integer),
         )
         table.create(engine)
-        print("테이블 생성 완료: mlb_players")
+        print("Table created: mlb_players")
 
 
 def fetch_and_store():
-    """API 호출 → DB 저장"""
+    """Fetches from API and stores in DB."""
     response = requests.get(API_URL)
     response.raise_for_status()
     players = response.json().get("people", [])
@@ -89,7 +89,7 @@ def fetch_and_store():
         conn.execute(table.insert(), rows)
         conn.commit()
 
-    print(f"저장 완료: {len(rows)}명")
+    print(f"Saved: {len(rows)} players")
 
 
 if __name__ == "__main__":

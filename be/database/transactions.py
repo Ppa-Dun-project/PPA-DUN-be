@@ -1,4 +1,4 @@
-# fetch_transactions.py
+# Fetches MLB transactions from statsapi.mlb.com and stores them in the trans_conts_status table.
 import requests
 import os
 from dotenv import load_dotenv
@@ -59,7 +59,7 @@ def ensure_table():
             Column("to_team_name", String(255)),
         )
         metadata.create_all(engine)
-        print("테이블 생성 완료: trans_conts_status")
+        print("Table created: trans_conts_status")
 
 
 def fetch_and_store():
@@ -91,7 +91,7 @@ def fetch_and_store():
         conn.execute(sql, rows)
         conn.commit()
 
-    print(f"저장/업데이트 완료: {len(rows)}건")
+    print(f"Saved/updated: {len(rows)} transactions")
 
 
 if __name__ == "__main__":
