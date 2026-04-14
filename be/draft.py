@@ -1,3 +1,8 @@
+# Draft page API router.
+# Handles draft configuration, player listing with DB-backed PPA scores,
+# pick registration/deletion (persisted to DB), slot assignment, and bootstrap.
+# When a user opens the Draft page, /bootstrap loads all necessary data in one call.
+# Player value scores and recommended bids come from the player_ppa_scores table.
 import logging
 from typing import Dict, List, Literal, Optional, Set, Tuple
 
@@ -108,7 +113,7 @@ class DraftBootstrapResponse(BaseModel):
     picks: List[DraftPickOut]
 
 
-# DB 포지션 → 드래프트 포지션 매핑
+# DB position -> draft position mapping
 _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "C": "C", "1B": "1B", "2B": "2B", "3B": "3B", "SS": "SS",
     "OF": "OF", "LF": "OF", "CF": "OF", "RF": "OF",
@@ -116,7 +121,7 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "P": "SP",
 }
 
-# DB에서 드래프트 포지션 필터용 SQL 조건을 생성
+# Builds SQL WHERE clause for draft position filtering
 def _draft_position_filter_sql(position: str) -> str:
     if position == "ALL":
         return ""
@@ -127,10 +132,10 @@ def _draft_position_filter_sql(position: str) -> str:
     if position == "OF":
         return "AND p.position IN ('OF','LF','CF','RF')"
     if position == "UTIL":
-        return ""  # UTIL은 모든 선수 가능
+        return ""  # UTIL allows all players
     return f"AND p.position = :position"
 
-# DB에서 드래프트 정렬용 SQL ORDER BY를 생성
+# Builds SQL ORDER BY clause for draft player sorting
 def _draft_sort_sql(sort: str) -> str:
     if sort == "score_desc":
         return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
@@ -161,7 +166,7 @@ _DRAFT_BASE_QUERY = """
 
 
 def _row_to_draft_player(row) -> DraftPlayerOut:
-    """DB row를 DraftPlayerOut으로 변환한다."""
+    """Converts a DB row into a DraftPlayerOut model."""
     r = row._mapping
     raw_pos = r["position"] or "DH"
     draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL")
@@ -216,7 +221,7 @@ DEFAULT_DRAFT_CONFIG = DraftConfigOut(
 )
 
 
-# DB 기반 드래프트 저장소
+# DB-backed draft storage
 from database.draft_store import (
     ensure_draft_tables,
     save_draft_config,
@@ -229,7 +234,7 @@ from database.draft_store import (
 )
 ensure_draft_tables()
 
-# 인메모리 캐시 (성능용, 픽이 변경되면 초기화)
+# In-memory caches for performance (cleared when picks change)
 ALLOWED_POSITIONS_CACHE: Dict[Tuple[str, str, str, int], List[DraftPosition]] = {}
 OCCUPIED_SLOTS_CACHE: Dict[str, Dict[str, Set[int]]] = {}
 DEFAULT_MY_TEAM_ID = "team-0"
@@ -262,16 +267,15 @@ SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "BENCH",
 ]
 
-# 들어온 숫자를 특정 범위 안으로 강제로 맞춰주는 함수
-# 사용자가 이상한 값을 보내도, 자동으로 맞춰줌.
+# Clamps a number to a given range. Ensures user input stays within valid bounds.
 def clamp_int(value: Optional[int], min_value: int, max_value: int, fallback: int) -> int:
     if value is None:
         return fallback
     return max(min_value, min(max_value, int(value)))
 
 
-# 드래프트 방에 들어갈 팀 목록을 생성하는 함수.
-# opp_team_names: 사용자가 입력한 상대팀 이름 리스트 (빈 값이면 자동 생성)
+# Builds the list of teams for a draft room.
+# opp_team_names: user-provided opponent names (auto-generated if empty)
 def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_count: int) -> List[DraftTeamOut]:
     teams: List[DraftTeamOut] = [
         DraftTeamOut(id="team-0", name=my_team_name or "My Team", isMine=True)
@@ -306,7 +310,7 @@ def sort_draft_players(players: List[DraftPlayerOut], sort: DraftSort) -> List[D
 
 
 def clear_user_caches(user_id: str) -> None:
-    """픽이 변경되면 해당 사용자의 캐시를 초기화한다."""
+    """Clears cached positions/slots for a user when picks change."""
     allowed_keys = [key for key in ALLOWED_POSITIONS_CACHE if key[0] == user_id]
     for key in allowed_keys:
         ALLOWED_POSITIONS_CACHE.pop(key, None)
@@ -314,7 +318,7 @@ def clear_user_caches(user_id: str) -> None:
 
 
 def get_user_picks(user_id: str) -> List[DraftPickOut]:
-    """DB에서 사용자의 드래프트 픽을 조회한다."""
+    """Loads all draft picks for a user from the database."""
     rows = load_draft_picks(user_id)
     return [
         DraftPickOut(
@@ -330,7 +334,7 @@ def get_user_picks(user_id: str) -> List[DraftPickOut]:
 
 
 def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:
-    """DB에서 player_id로 선수 1명을 조회한다."""
+    """Looks up a single player by player_id from the database."""
     from database.draft_store import engine
     sql = sa_text(f"""
         SELECT p.player_id, p.full_name, p.position, t.abbreviation,
@@ -403,7 +407,7 @@ def normalized_config(
     opponents_count: Optional[int],
 ) -> Tuple[DraftConfigOut, List[DraftTeamOut]]:
     
-    # 사용자가 보낸 값이 비정상적이라면 자동으로 범위 내의 정상값으로 바꿔주는 로직.
+    # Normalize user-provided values into valid ranges.
     normalized_budget = clamp_int(budget, 50, 600, DEFAULT_DRAFT_CONFIG.budget)
     normalized_roster = clamp_int(roster_players, 12, 35, DEFAULT_DRAFT_CONFIG.rosterPlayers)
     normalized_opponents = clamp_int(opponents_count, 0, 12, DEFAULT_DRAFT_CONFIG.opponentsCount)
@@ -471,7 +475,7 @@ def get_draft_players(
     keyword = (query or "").strip().lower()
     normalized_position = position.upper()
 
-    # WHERE 조건 조립
+    # Build WHERE clause
     where_parts = []
     params: Dict = {}
 
@@ -602,7 +606,7 @@ def upsert_draft_pick_endpoint(
 
     resolved_slot_pos = slot_template[resolved_slot_index]
 
-    # DB에 픽 저장
+    # Persist pick to DB
     upsert_draft_pick(
         user_id=user_id,
         player_id=payload.playerId,
@@ -634,7 +638,7 @@ def delete_draft_pick_endpoint(
 
 
 # Automatically called by Draft page on load to get all necessary data in one request (config/teams/filters/picks).
-# Draftpage에 접속하는 순간 해당 페이지에 필요한 모든 데이터를 한번에 반환.
+# Returns all data needed by the Draft page in a single response on page load.
 @router.get("/bootstrap", response_model=DraftBootstrapResponse)
 def get_draft_bootstrap(
     league_type: str = Query(default=DEFAULT_DRAFT_CONFIG.leagueType, alias="leagueType"),
@@ -655,7 +659,7 @@ def get_draft_bootstrap(
         opponents_count=opponents_count,
     )
 
-    # 설정을 DB에 저장
+    # Save config to DB
     save_draft_config(
         user_id=user_id,
         league_type=config.leagueType,
@@ -676,7 +680,7 @@ def get_draft_bootstrap(
     )
 
 
-# 사용자의 드래프트를 전체 초기화 (설정 + 모든 픽 삭제).
+# Resets user's entire draft (config + all picks deleted).
 @router.delete("/reset", response_model=dict)
 def reset_draft_endpoint(
     user_id: str = Query(default="default", alias="userId"),

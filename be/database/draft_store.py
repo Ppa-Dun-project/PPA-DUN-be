@@ -1,5 +1,5 @@
-# draft_store.py — 드래프트 설정 및 픽 데이터의 DB 저장/조회를 담당하는 모듈.
-# 사용자별 드래프트 설정(draft_config)과 전체 픽(draft_picks)을 관리한다.
+# CRUD operations for draft_config and draft_picks tables.
+# Manages per-user draft settings and pick records.
 import json
 import os
 from datetime import datetime
@@ -18,7 +18,7 @@ metadata = MetaData()
 
 
 def ensure_draft_tables():
-    """draft_config, draft_picks 테이블이 없으면 생성한다."""
+    """Creates draft_config and draft_picks tables if they don't exist."""
     inspector = inspect(engine)
 
     if not inspector.has_table("draft_config"):
@@ -35,7 +35,7 @@ def ensure_draft_tables():
             Column("updated_at", DateTime),
         )
         metadata.create_all(engine)
-        print("테이블 생성 완료: draft_config")
+        print("Table created: draft_config")
 
     if not inspector.has_table("draft_picks"):
         Table(
@@ -62,7 +62,7 @@ def ensure_draft_tables():
                 "ADD INDEX idx_user_id (user_id)"
             ))
             conn.commit()
-        print("테이블 생성 완료: draft_picks")
+        print("Table created: draft_picks")
 
 
 # ── draft_config CRUD ──
@@ -76,7 +76,7 @@ def save_draft_config(
     opp_team_names: List[str],
     opponents_count: int,
 ) -> None:
-    """드래프트 설정을 저장한다 (없으면 INSERT, 있으면 UPDATE)."""
+    """Saves draft config (INSERT or UPDATE on duplicate)."""
     now = datetime.utcnow()
     sql = text("""
         INSERT INTO draft_config
@@ -111,7 +111,7 @@ def save_draft_config(
 
 
 def load_draft_config(user_id: str) -> Optional[dict]:
-    """사용자의 드래프트 설정을 조회한다. 없으면 None."""
+    """Loads a user's draft config. Returns None if not found."""
     sql = text("SELECT * FROM draft_config WHERE user_id = :user_id")
     with engine.connect() as conn:
         row = conn.execute(sql, {"user_id": user_id}).fetchone()
@@ -135,7 +135,7 @@ def load_draft_config(user_id: str) -> Optional[dict]:
 # ── draft_picks CRUD ──
 
 def load_draft_picks(user_id: str) -> List[dict]:
-    """사용자의 모든 드래프트 픽을 조회한다 (내 픽 + 상대 픽 전부)."""
+    """Loads all draft picks for a user (own picks + opponent picks)."""
     sql = text("""
         SELECT player_id, drafted_by_team_id, slot_index,
                slot_pos, bid, pick_type
@@ -167,7 +167,7 @@ def upsert_draft_pick(
     bid: Optional[int],
     pick_type: str,
 ) -> None:
-    """드래프트 픽을 저장한다 (같은 user_id+player_id면 UPDATE)."""
+    """Saves a draft pick (UPDATE on duplicate user_id+player_id)."""
     now = datetime.utcnow()
     sql = text("""
         INSERT INTO draft_picks
@@ -198,7 +198,7 @@ def upsert_draft_pick(
 
 
 def delete_draft_pick(user_id: str, player_id: str) -> bool:
-    """특정 픽을 삭제한다. 삭제되었으면 True."""
+    """Deletes a specific pick. Returns True if a row was deleted."""
     sql = text("""
         DELETE FROM draft_picks
         WHERE user_id = :user_id AND player_id = :player_id
@@ -210,7 +210,7 @@ def delete_draft_pick(user_id: str, player_id: str) -> bool:
 
 
 def reset_draft(user_id: str) -> None:
-    """사용자의 드래프트를 전체 초기화한다 (설정 + 모든 픽 삭제)."""
+    """Resets a user's entire draft (deletes config + all picks)."""
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM draft_picks WHERE user_id = :user_id"), {"user_id": user_id})
         conn.execute(text("DELETE FROM draft_config WHERE user_id = :user_id"), {"user_id": user_id})
@@ -218,7 +218,7 @@ def reset_draft(user_id: str) -> None:
 
 
 def save_all_picks(user_id: str, picks: List[dict]) -> None:
-    """사용자의 모든 픽을 한번에 저장한다 (기존 픽 삭제 후 새로 삽입)."""
+    """Bulk saves all picks for a user (deletes existing, then inserts new)."""
     now = datetime.utcnow()
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM draft_picks WHERE user_id = :user_id"), {"user_id": user_id})

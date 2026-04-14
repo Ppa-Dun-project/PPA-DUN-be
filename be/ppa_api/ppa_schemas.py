@@ -1,6 +1,7 @@
-# 외부 PPA API와 주고받는 요청/응답 데이터의 스키마(Pydantic 모델)를 정의하는 모듈.
-# 타자/투수별 스탯, 리그 컨텍스트, 드래프트 컨텍스트 등 입력 검증과 포지션 정규화 로직을 포함한다.
-# 외부 API의 snake_case 응답을 camelCase 내부 모델로 매핑하는 변환 함수들도 제공한다.
+# Pydantic schemas for external PPA API request/response data.
+# Defines batter/pitcher stats, league context, draft context models with validation,
+# and converter functions that map between the external API's snake_case JSON
+# and the internal camelCase models.
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
