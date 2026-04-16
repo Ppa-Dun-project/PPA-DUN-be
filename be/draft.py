@@ -1,21 +1,15 @@
+# Draft page API router.
+# Handles draft configuration, player listing with DB-backed PPA scores,
+# pick registration/deletion (persisted to DB), slot assignment, and bootstrap.
+# When a user opens the Draft page, /bootstrap loads all necessary data in one call.
+# Player value scores and recommended bids come from the player_ppa_scores table.
 import logging
 from typing import Dict, List, Literal, Optional, Set, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
-from ppa_api.ppa_schemas import (
-    BatterBidRequestIn,
-    BatterStatsIn,
-    DraftContextIn,
-    LeagueContextIn,
-    PitcherBidRequestIn,
-    PitcherStatsIn,
-)
-from ppa_api.ppa_service import PpaAdapterService, PpaServiceError, get_ppa_adapter_service
-
-from core.config import settings
 
 # Used by Draft page APIs (config/filters/teams/players/picks).
 router = APIRouter(prefix="/api/draft", tags=["draft"])
@@ -119,7 +113,7 @@ class DraftBootstrapResponse(BaseModel):
     picks: List[DraftPickOut]
 
 
-# DB 포지션 → 드래프트 포지션 매핑
+# DB position -> draft position mapping
 _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "C": "C", "1B": "1B", "2B": "2B", "3B": "3B", "SS": "SS",
     "OF": "OF", "LF": "OF", "CF": "OF", "RF": "OF",
@@ -127,7 +121,7 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "P": "SP",
 }
 
-# DB에서 드래프트 포지션 필터용 SQL 조건을 생성
+# Builds SQL WHERE clause for draft position filtering
 def _draft_position_filter_sql(position: str) -> str:
     if position == "ALL":
         return ""
@@ -138,15 +132,19 @@ def _draft_position_filter_sql(position: str) -> str:
     if position == "OF":
         return "AND p.position IN ('OF','LF','CF','RF')"
     if position == "UTIL":
-        return ""  # UTIL은 모든 선수 가능
+        return ""  # UTIL allows all players
     return f"AND p.position = :position"
 
-# DB에서 드래프트 정렬용 SQL ORDER BY를 생성
+# Builds SQL ORDER BY clause for draft player sorting
 def _draft_sort_sql(sort: str) -> str:
     if sort == "score_desc":
-        return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
     if sort == "score_asc":
-        return "ORDER BY COALESCE(s.FPTS, 0) ASC, p.full_name ASC"
+        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
+    if sort == "cost_desc":
+        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
+    if sort == "cost_asc":
+        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
     if sort == "avg_desc":
         return "ORDER BY COALESCE(s.AVG, 0) DESC, p.full_name ASC"
     if sort == "hr_desc":
@@ -155,38 +153,37 @@ def _draft_sort_sql(sort: str) -> str:
         return "ORDER BY COALESCE(s.RBI, 0) DESC, p.full_name ASC"
     if sort == "sb_desc":
         return "ORDER BY COALESCE(s.SB, 0) DESC, p.full_name ASC"
-    # cost_desc, cost_asc → PPA API enrichment 후 Python에서 정렬
-    return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+    return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
 
 
 _DRAFT_BASE_QUERY = """
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+    LEFT JOIN player_ppa_scores ppa ON p.player_id = ppa.player_id
     WHERE p.active = 1
 """
 
 
 def _row_to_draft_player(row) -> DraftPlayerOut:
-    """DB row를 DraftPlayerOut으로 변환한다."""
+    """Converts a DB row into a DraftPlayerOut model."""
     r = row._mapping
     raw_pos = r["position"] or "DH"
     draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL")
-    fpts = float(r.get("FPTS") or 0)
-    # recommendedBid: FPTS 기반 임시 추정 (PPA API enrichment에서 덮어씀)
-    estimated_bid = max(1, int(fpts / 35)) if fpts > 0 else 1
+    ppa_value = float(r.get("value_score") or 0)
+    recommended_bid = int(r.get("recommended_bid") or 0)
 
     return DraftPlayerOut(
         id=str(r["player_id"]),
         name=r["full_name"],
         positions=[draft_pos],
-        recommendedBid=estimated_bid,
+        recommendedBid=max(1, recommended_bid) if recommended_bid > 0 else 1,
         team=r["abbreviation"] or "",
         avg=round(float(r.get("AVG") or 0), 3) or None,
         hr=int(r.get("HR") or 0) or None,
         rbi=int(r.get("RBI") or 0) or None,
         sb=int(r.get("SB") or 0) or None,
-        ppaValue=round(fpts, 1),
+        ppaValue=round(ppa_value, 1),
     )
 
 MOCK_DRAFT_POSITION_FILTERS: List[DraftPositionFilter] = [
@@ -224,30 +221,21 @@ DEFAULT_DRAFT_CONFIG = DraftConfigOut(
 )
 
 
-# DB 기반 드래프트 저장소
+# DB-backed draft storage
 from database.draft_store import (
     ensure_draft_tables,
     save_draft_config,
-    load_draft_config,
     load_draft_picks,
     upsert_draft_pick,
     delete_draft_pick,
     reset_draft,
-    save_all_picks,
 )
 ensure_draft_tables()
 
-# 인메모리 캐시 (성능용, 픽이 변경되면 초기화)
+# In-memory caches for performance (cleared when picks change)
 ALLOWED_POSITIONS_CACHE: Dict[Tuple[str, str, str, int], List[DraftPosition]] = {}
 OCCUPIED_SLOTS_CACHE: Dict[str, Dict[str, Set[int]]] = {}
-PLAYER_MARKET_CACHE: Dict[
-    Tuple[str, int, int, int, int, int, int, Tuple[str, ...]],
-    Tuple[int, float],
-] = {}
-PITCHER_POSITIONS: Set[str] = {"SP", "RP"}
-BATTER_POSITIONS: Set[str] = {"C", "1B", "2B", "3B", "SS", "OF", "DH"}
 DEFAULT_MY_TEAM_ID = "team-0"
-MAX_EXTERNAL_BID_CALLS_PER_REQUEST = 40
 
 SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "SP",
@@ -277,19 +265,18 @@ SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "BENCH",
 ]
 
-# 들어온 숫자를 특정 범위 안으로 강제로 맞춰주는 함수
-# 사용자가 이상한 값을 보내도, 자동으로 맞춰줌.
+# Clamps a number to a given range. Ensures user input stays within valid bounds.
 def clamp_int(value: Optional[int], min_value: int, max_value: int, fallback: int) -> int:
     if value is None:
         return fallback
     return max(min_value, min(max_value, int(value)))
 
 
-# 드래프트 방에 들어갈 팀 목록을 생성하는 함수.
-# opp_team_names: 사용자가 입력한 상대팀 이름 리스트 (빈 값이면 자동 생성)
+# Builds the list of teams for a draft room.
+# opp_team_names: user-provided opponent names (auto-generated if empty)
 def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_count: int) -> List[DraftTeamOut]:
     teams: List[DraftTeamOut] = [
-        DraftTeamOut(id="team-0", name=my_team_name or "My Team", isMine=True)
+        DraftTeamOut(id=DEFAULT_MY_TEAM_ID, name=my_team_name or "My Team", isMine=True)
     ]
     for i in range(max(0, opponents_count)):
         name = opp_team_names[i] if i < len(opp_team_names) and opp_team_names[i] else f"Opponent {i + 1}"
@@ -297,207 +284,12 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
     return teams
 
 
-def sort_draft_players(players: List[DraftPlayerOut], sort: DraftSort) -> List[DraftPlayerOut]:
-    numeric = lambda value: value if value is not None else -1
-    if sort == "score_desc":
-        return sorted(players, key=lambda p: p.ppaValue, reverse=True)
-    if sort == "score_asc":
-        return sorted(players, key=lambda p: p.ppaValue)
-    if sort == "cost_desc":
-        return sorted(players, key=lambda p: p.recommendedBid, reverse=True)
-    if sort == "cost_asc":
-        return sorted(players, key=lambda p: p.recommendedBid)
-    if sort == "avg_desc":
-        return sorted(players, key=lambda p: numeric(p.avg), reverse=True)
-    if sort == "hr_desc":
-        return sorted(players, key=lambda p: numeric(p.hr), reverse=True)
-    if sort == "rbi_desc":
-        return sorted(players, key=lambda p: numeric(p.rbi), reverse=True)
-    if sort == "sb_desc":
-        return sorted(players, key=lambda p: numeric(p.sb), reverse=True)
-    return players
 
 
-def is_external_bid_enabled() -> bool:
-    return bool(settings.EXTERNAL_API_BASE_URL and settings.EXTERNAL_API_KEY)
-
-
-def is_pitcher(player: DraftPlayerOut) -> bool:
-    return any(pos in PITCHER_POSITIONS for pos in player.positions)
-
-
-def to_external_position(player: DraftPlayerOut, pitcher: bool) -> str:
-    primary = player.positions[0] if player.positions else ("SP" if pitcher else "OF")
-    normalized = primary.upper()
-    if pitcher:
-        return "RP" if normalized == "RP" else "SP"
-    if normalized == "UTIL":
-        return "DH"
-    return normalized if normalized in BATTER_POSITIONS else "OF"
-
-
-def build_batter_stats(player: DraftPlayerOut) -> BatterStatsIn:
-    hr = max(0, int(player.hr or 0))
-    rbi = max(0, int(player.rbi or 0))
-    sb = max(0, int(player.sb or 0))
-    avg = float(player.avg or 0.250)
-    if avg <= 0:
-        avg = 0.250
-    runs = max(0, int(round((rbi * 0.55) + (hr * 0.8) + (sb * 0.3) + 30)))
-    caught_stealing = min(sb, max(0, int(round(sb * 0.25))))
-    return BatterStatsIn(
-        AB=550,
-        R=runs,
-        HR=hr,
-        RBI=rbi,
-        SB=sb,
-        CS=caught_stealing,
-        AVG=avg,
-    )
-
-
-def build_pitcher_stats(player: DraftPlayerOut) -> PitcherStatsIn:
-    # Keep payload generation independent from static ppaValue.
-    baseline_bid = max(1, int(player.recommendedBid or 1))
-    tier_scale = max(0.65, min(1.25, baseline_bid / 25.0))
-    is_relief = "RP" in player.positions
-    if is_relief:
-        ip = round(60.0 * tier_scale, 1)
-        wins = max(1, int(round(3 * tier_scale)))
-        saves = max(5, int(round(30 * tier_scale)))
-        strikeouts = max(35, int(round(80 * tier_scale)))
-        era = max(1.8, round(3.4 - ((tier_scale - 1.0) * 0.9), 2))
-        whip = max(0.85, round(1.12 - ((tier_scale - 1.0) * 0.16), 2))
-    else:
-        ip = round(170.0 * tier_scale, 1)
-        wins = max(3, int(round(11 * tier_scale)))
-        saves = 0
-        strikeouts = max(80, int(round(185 * tier_scale)))
-        era = max(2.2, round(3.8 - ((tier_scale - 1.0) * 0.9), 2))
-        whip = max(0.92, round(1.2 - ((tier_scale - 1.0) * 0.14), 2))
-    return PitcherStatsIn(
-        IP=ip,
-        W=wins,
-        SV=saves,
-        K=strikeouts,
-        ERA=era,
-        WHIP=whip,
-    )
-
-
-def build_league_context(
-    budget: int,
-    roster_slots: int,
-    opponents_count: int,
-) -> LeagueContextIn:
-    league_size = max(1, opponents_count + 1)
-    return LeagueContextIn(
-        leagueSize=league_size,
-        rosterSize=max(1, roster_slots),
-        totalBudget=max(1, budget * league_size),
-    )
-
-
-def build_draft_context(
-    user_id: str,
-    my_team_id: str,
-    budget: int,
-    roster_slots: int,
-) -> DraftContextIn:
-    picks = get_user_picks(user_id)
-    my_picks = [pick for pick in picks if pick.draftedByTeamId == my_team_id]
-    spent_budget = sum(pick.bid for pick in my_picks if isinstance(pick.bid, int))
-    return DraftContextIn(
-        myRemainingBudget=max(0, budget - spent_budget),
-        myRemainingRosterSpots=max(1, roster_slots - len(my_picks)),
-        myPositionsFilled=[pick.slotPos for pick in my_picks],
-        draftedPlayersCount=len(picks),
-    )
-
-
-def resolve_player_market_values(
-    player: DraftPlayerOut,
-    league_context: LeagueContextIn,
-    draft_context: DraftContextIn,
-    service: PpaAdapterService,
-) -> Tuple[int, float]:
-    cache_key = (
-        player.id,
-        league_context.leagueSize,
-        league_context.rosterSize,
-        league_context.totalBudget,
-        draft_context.myRemainingBudget,
-        draft_context.myRemainingRosterSpots,
-        draft_context.draftedPlayersCount,
-        tuple(draft_context.myPositionsFilled),
-    )
-    cached = PLAYER_MARKET_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
-    pitcher = is_pitcher(player)
-    position = to_external_position(player, pitcher=pitcher)
-    try:
-        if pitcher:
-            payload = PitcherBidRequestIn(
-                playerName=player.name,
-                playerType="pitcher",
-                position=position,
-                stats=build_pitcher_stats(player),
-                leagueContext=league_context,
-                draftContext=draft_context,
-            )
-        else:
-            payload = BatterBidRequestIn(
-                playerName=player.name,
-                playerType="batter",
-                position=position,
-                stats=build_batter_stats(player),
-                leagueContext=league_context,
-                draftContext=draft_context,
-            )
-
-        response = service.calculate_player_bid(payload)
-        resolved_bid = max(1, int(getattr(response, "recommendedBid", player.recommendedBid)))
-        resolved_value = float(getattr(response, "playerValue", player.ppaValue))
-        resolved_pair = (resolved_bid, resolved_value)
-        PLAYER_MARKET_CACHE[cache_key] = resolved_pair
-        return resolved_pair
-    except PpaServiceError as exc:
-        logger.debug("Bid recommendation fallback for player=%s: %s", player.id, exc.detail)
-        return (player.recommendedBid, player.ppaValue)
-    except Exception:
-        logger.exception("Unexpected bid recommendation fallback for player=%s", player.id)
-        return (player.recommendedBid, player.ppaValue)
-
-
-def enrich_players_with_external_bid(
-    players: List[DraftPlayerOut],
-    league_context: LeagueContextIn,
-    draft_context: DraftContextIn,
-    service: PpaAdapterService,
-) -> List[DraftPlayerOut]:
-    enriched: List[DraftPlayerOut] = []
-    for player in players:
-        resolved_bid, resolved_value = resolve_player_market_values(
-            player=player,
-            league_context=league_context,
-            draft_context=draft_context,
-            service=service,
-        )
-        enriched.append(
-            player.model_copy(
-                update={
-                    "recommendedBid": resolved_bid,
-                    "ppaValue": resolved_value,
-                }
-            )
-        )
-    return enriched
 
 
 def clear_user_caches(user_id: str) -> None:
-    """픽이 변경되면 해당 사용자의 캐시를 초기화한다."""
+    """Clears cached positions/slots for a user when picks change."""
     allowed_keys = [key for key in ALLOWED_POSITIONS_CACHE if key[0] == user_id]
     for key in allowed_keys:
         ALLOWED_POSITIONS_CACHE.pop(key, None)
@@ -505,7 +297,7 @@ def clear_user_caches(user_id: str) -> None:
 
 
 def get_user_picks(user_id: str) -> List[DraftPickOut]:
-    """DB에서 사용자의 드래프트 픽을 조회한다."""
+    """Loads all draft picks for a user from the database."""
     rows = load_draft_picks(user_id)
     return [
         DraftPickOut(
@@ -521,11 +313,11 @@ def get_user_picks(user_id: str) -> List[DraftPickOut]:
 
 
 def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:
-    """DB에서 player_id로 선수 1명을 조회한다."""
+    """Looks up a single player by player_id from the database."""
     from database.draft_store import engine
     sql = sa_text(f"""
         SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-               s.AVG, s.HR, s.RBI, s.SB, s.FPTS
+               s.AVG, s.HR, s.RBI, s.SB, ppa.value_score, ppa.recommended_bid
         {_DRAFT_BASE_QUERY} AND p.player_id = :player_id
     """)
     with engine.connect() as conn:
@@ -559,15 +351,6 @@ def find_available_slot_index_with_occupied(
     return -1
 
 
-def find_available_slot_index(
-    team_id: str,
-    desired_pos: DraftPosition,
-    slot_template: List[DraftPosition],
-    picks: List[DraftPickOut],
-) -> int:
-    occupied = {pick.slotIndex for pick in picks if pick.draftedByTeamId == team_id}
-    return find_available_slot_index_with_occupied(desired_pos, slot_template, occupied)
-
 
 def get_occupied_slots_by_team(
     user_id: str,
@@ -594,7 +377,7 @@ def normalized_config(
     opponents_count: Optional[int],
 ) -> Tuple[DraftConfigOut, List[DraftTeamOut]]:
     
-    # 사용자가 보낸 값이 비정상적이라면 자동으로 범위 내의 정상값으로 바꿔주는 로직.
+    # Normalize user-provided values into valid ranges.
     normalized_budget = clamp_int(budget, 50, 600, DEFAULT_DRAFT_CONFIG.budget)
     normalized_roster = clamp_int(roster_players, 12, 35, DEFAULT_DRAFT_CONFIG.rosterPlayers)
     normalized_opponents = clamp_int(opponents_count, 0, 12, DEFAULT_DRAFT_CONFIG.opponentsCount)
@@ -656,19 +439,13 @@ def get_draft_players(
     sort: DraftSort = Query(default="score_desc"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1),
-    user_id: str = Query(default="default", alias="userId"),
-    my_team_id: str = Query(default=DEFAULT_MY_TEAM_ID, alias="myTeamId"),
-    budget: int = Query(default=DEFAULT_DRAFT_CONFIG.budget, ge=50, le=600),
-    roster_players: int = Query(default=DEFAULT_DRAFT_CONFIG.rosterPlayers, alias="rosterPlayers", ge=8, le=len(SLOT_TEMPLATE_BASE)),
-    opponents_count: int = Query(default=DEFAULT_DRAFT_CONFIG.opponentsCount, alias="opponentsCount", ge=0, le=12),
-    service: PpaAdapterService = Depends(get_ppa_adapter_service),
 ):
     from database.draft_store import engine
 
     keyword = (query or "").strip().lower()
     normalized_position = position.upper()
 
-    # WHERE 조건 조립
+    # Build WHERE clause
     where_parts = []
     params: Dict = {}
 
@@ -697,7 +474,7 @@ def get_draft_players(
     # DATA
     data_sql = sa_text(f"""
         SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-               s.AVG, s.HR, s.RBI, s.SB, s.FPTS
+               s.AVG, s.HR, s.RBI, s.SB, ppa.value_score, ppa.recommended_bid
         {_DRAFT_BASE_QUERY} {extra_where} {pos_sql}
         {sort_sql}
         LIMIT :limit OFFSET :offset
@@ -709,31 +486,6 @@ def get_draft_players(
         rows = conn.execute(data_sql, params).fetchall()
 
     paged = [_row_to_draft_player(r) for r in rows]
-
-    roster_slots = clamp_roster_slots(roster_players)
-    if is_external_bid_enabled() and paged:
-        league_context = build_league_context(
-            budget=budget,
-            roster_slots=roster_slots,
-            opponents_count=opponents_count,
-        )
-        draft_context = build_draft_context(
-            user_id=user_id,
-            my_team_id=my_team_id,
-            budget=budget,
-            roster_slots=roster_slots,
-        )
-        external_target = paged[:MAX_EXTERNAL_BID_CALLS_PER_REQUEST]
-        enriched = enrich_players_with_external_bid(
-            players=external_target,
-            league_context=league_context,
-            draft_context=draft_context,
-            service=service,
-        )
-        paged = enriched + paged[len(external_target):]
-
-        if sort in ("cost_desc", "cost_asc", "score_desc", "score_asc"):
-            paged = sort_draft_players(paged, sort)
 
     return DraftPlayerListResponse(
         items=paged,
@@ -824,7 +576,7 @@ def upsert_draft_pick_endpoint(
 
     resolved_slot_pos = slot_template[resolved_slot_index]
 
-    # DB에 픽 저장
+    # Persist pick to DB
     upsert_draft_pick(
         user_id=user_id,
         player_id=payload.playerId,
@@ -856,7 +608,7 @@ def delete_draft_pick_endpoint(
 
 
 # Automatically called by Draft page on load to get all necessary data in one request (config/teams/filters/picks).
-# Draftpage에 접속하는 순간 해당 페이지에 필요한 모든 데이터를 한번에 반환.
+# Returns all data needed by the Draft page in a single response on page load.
 @router.get("/bootstrap", response_model=DraftBootstrapResponse)
 def get_draft_bootstrap(
     league_type: str = Query(default=DEFAULT_DRAFT_CONFIG.leagueType, alias="leagueType"),
@@ -877,7 +629,7 @@ def get_draft_bootstrap(
         opponents_count=opponents_count,
     )
 
-    # 설정을 DB에 저장
+    # Save config to DB
     save_draft_config(
         user_id=user_id,
         league_type=config.leagueType,
@@ -898,11 +650,10 @@ def get_draft_bootstrap(
     )
 
 
-# 사용자의 드래프트를 전체 초기화 (설정 + 모든 픽 삭제).
+# Resets user's entire draft (config + all picks deleted).
 @router.delete("/reset", response_model=dict)
 def reset_draft_endpoint(
-    user_id: str = Query(default="default", alias="userId"),
-):
+    user_id: str = Query(default="default", alias="userId"),):
     reset_draft(user_id)
     clear_user_caches(user_id)
     return {"status": "ok", "userId": user_id}

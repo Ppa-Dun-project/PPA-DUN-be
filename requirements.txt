@@ -5,3 +5,7 @@ python-dotenv
 
 SQLAlchemy
 pymysql
+cryptography
+
+pytest
+httpx

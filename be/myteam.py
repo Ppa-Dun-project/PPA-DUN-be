@@ -1,3 +1,6 @@
+# My Team page API router.
+# Shows the user's drafted players with filter/sort, and a budget summary
+# (total budget, amount spent, remaining). Used after the user drafts players.
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Query

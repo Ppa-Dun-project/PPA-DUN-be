@@ -1,4 +1,6 @@
-﻿from pathlib import Path
+﻿# Application settings loaded from backend/.env via pydantic-settings.
+# Includes CORS origins, external PPA API connection details, and timeout config.
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

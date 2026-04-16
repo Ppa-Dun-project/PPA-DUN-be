@@ -1,11 +1,13 @@
+# Unit test: verifies PPA router endpoints return correct responses with stubbed service,
+# and PPA adapter service maps external API errors to proper HTTP status codes.
 import unittest
 
 from fastapi.testclient import TestClient
 
 import main
-from ppa_client import ExternalApiHttpError, ExternalApiNetworkError
-from ppa_schemas import BatterBidRequestIn, BatterValueRequestIn
-from ppa_service import PpaAdapterService, PpaServiceError, get_ppa_adapter_service
+from ppa_api.ppa_client import ExternalApiHttpError, ExternalApiNetworkError
+from ppa_api.ppa_schemas import BatterBidRequestIn, BatterValueRequestIn
+from ppa_api.ppa_service import PpaAdapterService, PpaServiceError, get_ppa_adapter_service
 
 
 def build_batter_value_payload() -> dict:

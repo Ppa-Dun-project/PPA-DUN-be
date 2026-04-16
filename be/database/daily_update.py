@@ -1,10 +1,9 @@
-# daily_update.py — 매일 새벽에 실행하는 데이터 업데이트 스크립트.
-# injury, depth_charts, transactions 3개를 순차적으로 업데이트한다.
+# Daily data update script. Refreshes injury, depth_charts, and transactions sequentially.
 #
-# 사용법:
-#   1) 직접 실행:  python daily_update.py
-#   2) 스케줄러:   python daily_update.py --scheduled  (매일 3AM ET 자동 실행)
-#   3) 외부 cron:  cron이나 Cloud Scheduler에서 1번 방식으로 호출
+# Usage:
+#   1) Direct run:  python daily_update.py
+#   2) Scheduler:   python daily_update.py --scheduled  (auto-runs daily at 3AM ET)
+#   3) External:    call option 1 from cron or Cloud Scheduler
 import argparse
 import logging
 import sys
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_daily_update():
-    """injury, depth_charts, transactions를 순차적으로 업데이트한다."""
+    """Sequentially updates injury, depth_charts, and transactions."""
     start = datetime.now()
     logger.info("=== Daily update started ===")
     results = {}
@@ -27,7 +26,7 @@ def run_daily_update():
     # 1. Injuries
     try:
         logger.info("[1/3] Updating injuries...")
-        from injury import fetch_and_store as update_injuries
+        from be.database.injury import fetch_and_store as update_injuries
         update_injuries()
         results["injuries"] = "OK"
     except Exception as e:
@@ -37,7 +36,7 @@ def run_daily_update():
     # 2. Depth Charts
     try:
         logger.info("[2/3] Updating depth charts...")
-        from depth_charts import fetch_and_store as update_depth_charts
+        from be.database.depth_charts import fetch_and_store as update_depth_charts
         update_depth_charts()
         results["depth_charts"] = "OK"
     except Exception as e:
@@ -47,7 +46,7 @@ def run_daily_update():
     # 3. Transactions
     try:
         logger.info("[3/3] Updating transactions...")
-        from transactions import fetch_and_store as update_transactions
+        from be.database.transactions import fetch_and_store as update_transactions
         update_transactions()
         results["transactions"] = "OK"
     except Exception as e:
@@ -63,12 +62,12 @@ def run_daily_update():
 
 
 def run_scheduled():
-    """매일 3AM ET에 자동 실행하는 스케줄러 모드."""
+    """Scheduler mode: auto-runs daily at 3AM ET."""
     try:
         from apscheduler.schedulers.blocking import BlockingScheduler
         from apscheduler.triggers.cron import CronTrigger
     except ImportError:
-        logger.error("apscheduler가 필요합니다: pip install apscheduler")
+        logger.error("apscheduler is required: pip install apscheduler")
         sys.exit(1)
 
     scheduler = BlockingScheduler()

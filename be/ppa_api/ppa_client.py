@@ -1,6 +1,7 @@
-# 외부 PPA 평가 API와 HTTP 통신을 수행하는 저수준 클라이언트 모듈.
-# urllib 기반으로 health, player/value, player/bid 엔드포인트를 호출한다.
-# HTTP 에러, 네트워크 타임아웃, 잘못된 응답 등 다양한 예외 클래스를 정의하여 상위 계층에서 처리할 수 있게 한다.
+# Low-level HTTP client for the external PPA valuation API.
+# Sends requests to /health, /player/value, and /player/bid using urllib.
+# Defines exception classes (HTTP errors, timeouts, invalid responses)
+# so the service layer can map them to appropriate HTTP status codes.
 import json
 import socket
 from typing import Any
@@ -93,10 +94,10 @@ class PpaExternalApiClient:
         )
 
         try:
-            # API 호출 지점
+            # Send request to external API
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 
-                # API에서 본문 수신 하는 지점
+                # Read response body from API
                 raw_body = response.read().decode("utf-8")
                 if not raw_body:
                     return {}

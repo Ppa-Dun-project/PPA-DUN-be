@@ -1,3 +1,7 @@
+# Players page API router.
+# Provides player list with search/filter/sort, player detail with full stats,
+# and a per-player value endpoint that reads from the player_ppa_scores table.
+# Used when the user browses the Players catalog or opens a player detail modal.
 import logging
 import os
 import re
@@ -21,14 +25,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/players", tags=["players"])
 
 
-# Used by PlayerDetail page. 선수의 상세 스탯 블록.
+# Used by PlayerDetail page. Detailed stat block for a single player.
 class PlayerStats(BaseModel):
     g: int
     pa: int
     hr: int
     ops: float
     ip: float = 0.0
-    # 추가 타격 스탯
+    # Additional batting stats
     ab: int = 0
     r: int = 0
     h: int = 0
@@ -40,7 +44,7 @@ class PlayerStats(BaseModel):
     obp: float = 0.0
     slg: float = 0.0
 
-# Used by PlayerDetail page. 선수 한명의 풀 데이터
+# Used by PlayerDetail page. Full data for a single player.
 class PlayerOut(BaseModel):
     id: int
     name: str
@@ -55,7 +59,7 @@ class PlayerOut(BaseModel):
     headshotUrl: Optional[str] = None
     stats: PlayerStats
 
-# Used by player list/table cards. 테이블에 적을 주요 정보.
+# Used by player list/table cards. Key info displayed in the table row.
 class PlayerListItem(BaseModel):
     id: int
     name: str
@@ -64,7 +68,7 @@ class PlayerListItem(BaseModel):
     valueScore: float
     headshotUrl: Optional[str] = None
 
-# Player list with 페이지네이션. (응답 형식)
+# Paginated player list response.
 class PlayerListResponse(BaseModel):
     items: List[PlayerListItem]
     page: int
@@ -73,7 +77,7 @@ class PlayerListResponse(BaseModel):
     totalPages: int
 
 
-# Used by PlayersToolbar position chips. 포지션 필터링 목록 응답 형식
+# Used by PlayersToolbar position chips. Position filter options.
 class PlayerPositionFiltersResponse(BaseModel):
     positions: List[str]
 
@@ -99,7 +103,7 @@ PLAYER_SORT_OPTIONS: List[PlayerSortOption] = [
     PlayerSortOption(value="name_desc", label="Name (Z -> A)"),
 ]
 
-# DB 포지션 → UI 필터 매핑 (LF, CF, RF → OF)
+# DB position -> UI filter mapping (LF, CF, RF -> OF)
 POSITION_TO_FILTER = {
     "LF": "OF", "CF": "OF", "RF": "OF",
     "TWP": "P", "IF": "SS",
@@ -107,7 +111,7 @@ POSITION_TO_FILTER = {
 
 
 def parse_height_to_inches(height_str: str) -> int:
-    """'6\\' 0\"' 형식을 인치로 변환"""
+    """Converts height string like 6' 0\" to total inches."""
     match = re.match(r"(\d+)'\s*(\d+)\"?", height_str or "")
     if match:
         return int(match.group(1)) * 12 + int(match.group(2))
@@ -115,7 +119,7 @@ def parse_height_to_inches(height_str: str) -> int:
 
 
 def build_position_filter_sql(position: str) -> str:
-    """포지션 필터에 맞는 SQL WHERE 절 반환"""
+    """Returns SQL WHERE clause for the given position filter."""
     if position == "ALL":
         return ""
     if position == "P":
@@ -126,37 +130,36 @@ def build_position_filter_sql(position: str) -> str:
 
 
 def build_sort_sql(sort: SortOrder) -> str:
-    """정렬 기준 SQL ORDER BY 절 반환 (FPTS 기반 valueScore 정렬 지원)"""
+    """Returns SQL ORDER BY clause for the given sort option."""
     if sort == "name_asc":
         return "ORDER BY p.full_name ASC"
     if sort == "name_desc":
         return "ORDER BY p.full_name DESC"
     if sort == "value_desc":
-        return "ORDER BY COALESCE(s.FPTS, 0) DESC, p.full_name ASC"
+        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
     if sort == "value_asc":
-        return "ORDER BY COALESCE(s.FPTS, 0) ASC, p.full_name ASC"
+        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
     return "ORDER BY p.full_name ASC"
 
 
 def row_to_player_list_item(row) -> PlayerListItem:
-    """DB row를 PlayerListItem 모델로 변환"""
+    """Converts a DB row into a PlayerListItem model."""
     r = row._mapping
     raw_pos = r["position"] or "DH"
     display_pos = POSITION_TO_FILTER.get(raw_pos, raw_pos)
-    fpts = r.get("FPTS") or 0
 
     return PlayerListItem(
         id=r["player_id"],
         name=r["full_name"],
         team=r["abbreviation"] or "",
         positions=[display_pos],
-        valueScore=round(float(fpts), 1),
+        valueScore=round(float(r.get("value_score") or 0), 1),
         headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
     )
 
 
 def row_to_player_out(row) -> PlayerOut:
-    """DB row를 PlayerOut 모델로 변환 (상세 스탯 포함)"""
+    """Converts a DB row into a PlayerOut model with full stats."""
     r = row._mapping
     raw_pos = r["position"] or "DH"
     display_pos = POSITION_TO_FILTER.get(raw_pos, raw_pos)
@@ -166,7 +169,6 @@ def row_to_player_out(row) -> PlayerOut:
     hr = r.get("HR") or 0
     obp = r.get("OBP") or 0.0
     slg = r.get("SLG") or 0.0
-    fpts = r.get("FPTS") or 0
 
     return PlayerOut(
         id=r["player_id"],
@@ -178,7 +180,7 @@ def row_to_player_out(row) -> PlayerOut:
         throws=r["pitch_hand"] or "R",
         team=r["abbreviation"] or "",
         positions=[display_pos],
-        valueScore=round(float(fpts), 1),
+        valueScore=round(float(r.get("value_score") or 0), 1),
         headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
         stats=PlayerStats(
             g=0,
@@ -200,26 +202,27 @@ def row_to_player_out(row) -> PlayerOut:
     )
 
 
-# 공통 JOIN 쿼리 베이스 (선수 + 팀 + 스탯)
+# Base JOIN query (players + teams + stats + PPA scores)
 BASE_QUERY = """
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+    LEFT JOIN player_ppa_scores ppa ON p.player_id = ppa.player_id
     WHERE p.active = 1
 """
 
-# 리스트용 SELECT (스탯 테이블에서 FPTS만)
+# List SELECT (includes PPA valueScore)
 LIST_SELECT = """
     SELECT p.player_id, p.full_name, p.current_age, p.height, p.weight,
            p.bat_side, p.pitch_hand, p.position, t.abbreviation,
-           s.FPTS
+           ppa.value_score
 """
 
-# 상세용 SELECT (스탯 테이블 전체)
+# Detail SELECT (full stats + PPA valueScore)
 DETAIL_SELECT = """
     SELECT p.*, t.abbreviation,
            s.AB, s.R, s.H, s.HR, s.RBI, s.BB, s.K, s.SB,
-           s.AVG, s.OBP, s.SLG, s.FPTS
+           s.AVG, s.OBP, s.SLG, ppa.value_score
 """
 
 
@@ -308,8 +311,8 @@ def get_player_detail(player_id: int):
     return row_to_player_out(row)
 
 
-# 프론트엔드 PlayerInfoModal에서 호출하는 valueScore 전용 엔드포인트.
-# PPA 외부 API를 통해 실제 playerValue를 계산하여 반환한다.
+# Value endpoint called by the frontend PlayerInfoModal.
+# Returns the pre-calculated PPA valueScore from the player_ppa_scores table.
 class PlayerValueResponse(BaseModel):
     playerId: int
     name: str
@@ -318,44 +321,20 @@ class PlayerValueResponse(BaseModel):
 
 @router.get("/{player_id}/value", response_model=PlayerValueResponse)
 def get_player_value(player_id: int):
-    detail_sql = f"""
-        {DETAIL_SELECT}
-        {BASE_QUERY} AND p.player_id = :player_id
-    """
+    # Reads the PPA-calculated valueScore from the player_ppa_scores table.
+    ppa_sql = text("""
+        SELECT player_name, value_score
+        FROM player_ppa_scores
+        WHERE player_id = :player_id
+    """)
     with engine.connect() as conn:
-        row = conn.execute(text(detail_sql), {"player_id": player_id}).fetchone()
+        row = conn.execute(ppa_sql, {"player_id": player_id}).fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    player = row_to_player_out(row)
-
-    # PPA API로 진짜 valueScore 계산
-    try:
-        from ppa_api.ppa_service import PpaAdapterService
-        from ppa_api.ppa_schemas import (
-            BatterValueRequestIn, BatterStatsIn, LeagueContextIn,
-        )
-
-        svc = PpaAdapterService.from_settings()
-        payload = BatterValueRequestIn(
-            playerName=player.name,
-            playerType="batter",
-            position=player.positions[0],
-            stats=BatterStatsIn(
-                AB=player.stats.ab, R=player.stats.r, HR=player.stats.hr,
-                RBI=player.stats.rbi, SB=player.stats.sb, CS=0, AVG=player.stats.avg,
-            ),
-            leagueContext=LeagueContextIn(leagueSize=6, rosterSize=23, totalBudget=260),
-        )
-        result = svc.calculate_player_value(payload)
-        value_score = round(result.playerValue, 1)
-    except Exception as e:
-        logger.warning(f"PPA API call failed for {player.name}: {e}")
-        value_score = player.valueScore  # FPTS fallback
+        raise HTTPException(status_code=404, detail="Player PPA score not found")
 
     return PlayerValueResponse(
-        playerId=player.id,
-        name=player.name,
-        valueScore=value_score,
+        playerId=player_id,
+        name=row._mapping["player_name"],
+        valueScore=round(float(row._mapping["value_score"]), 1),
     )
