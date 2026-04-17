@@ -133,9 +133,10 @@ def load_draft_config(user_id: str) -> Optional[dict]:
 
 
 # ── draft_picks CRUD ──
-
+# 특정 드래프트 방의 모든 팀의 모든 픽을 가져옴 (내거 상대거 전부 다)
 def load_draft_picks(user_id: str) -> List[dict]:
-    """Loads all draft picks for a user (own picks + opponent picks)."""
+    
+    # 야구 선수 별 id, 뽑아간 팀 id 등등 개별 정보를 다 가지옴
     sql = text("""
         SELECT player_id, drafted_by_team_id, slot_index,
                slot_pos, bid, pick_type
@@ -143,8 +144,13 @@ def load_draft_picks(user_id: str) -> List[dict]:
         WHERE user_id = :user_id
         ORDER BY id ASC
     """)
+    # with 사용으로 블록 끝나면 자동 셧다운
     with engine.connect() as conn:
         rows = conn.execute(sql, {"user_id": user_id}).fetchall()
+    
+    # r.mapping으로 dict 형식으로 바꿔서 반환
+    # DB에서 한 row를 가져오면 SQLAlchemy가 Row 객체로 반환.
+    # 이걸 간편하게 키로 접근하기 위해 dict 형식으로 변환 (_mapping)
     return [
         {
             "playerId": r._mapping["player_id"],

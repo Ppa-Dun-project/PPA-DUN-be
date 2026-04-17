@@ -45,6 +45,7 @@ class DraftTeamOut(BaseModel):
     name: str
     isMine: bool
 
+# 선수별 드래프트 관련 정보 + 간단 개인 스탯
 class DraftPlayerOut(BaseModel):
     id: str
     name: str
@@ -77,6 +78,7 @@ class DraftSortFiltersResponse(BaseModel):
 class DraftTeamsResponse(BaseModel):
     items: List[DraftTeamOut]
 
+# 선수의 픽 상태 (어떤 팀이 픽했는지, 어떤 포지션에 배치됐는지, 가격은 얼마인지 등)
 class DraftPickOut(BaseModel):
     playerId: str
     draftedByTeamId: str
@@ -138,13 +140,13 @@ def _draft_position_filter_sql(position: str) -> str:
 # Builds SQL ORDER BY clause for draft player sorting
 def _draft_sort_sql(sort: str) -> str:
     if sort == "score_desc":
-        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
+        return "ORDER BY p.full_name DESC, p.full_name ASC"
     if sort == "score_asc":
-        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
+        return "ORDER BY p.full_name ASC, p.full_name ASC"
     if sort == "cost_desc":
-        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
+        return "ORDER BY p.full_name DESC, p.full_name ASC"
     if sort == "cost_asc":
-        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
+        return "ORDER BY p.full_name ASC, p.full_name ASC"
     if sort == "avg_desc":
         return "ORDER BY COALESCE(s.AVG, 0) DESC, p.full_name ASC"
     if sort == "hr_desc":
@@ -153,37 +155,40 @@ def _draft_sort_sql(sort: str) -> str:
         return "ORDER BY COALESCE(s.RBI, 0) DESC, p.full_name ASC"
     if sort == "sb_desc":
         return "ORDER BY COALESCE(s.SB, 0) DESC, p.full_name ASC"
-    return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
+    return "ORDER BY p.full_name DESC, p.full_name ASC"
 
 
+# active 칼럼: 1이면 현역, 0이면 은퇴/방출
+# 현역인 선수들 중 
 _DRAFT_BASE_QUERY = """
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
-    LEFT JOIN player_ppa_scores ppa ON p.player_id = ppa.player_id
     WHERE p.active = 1
 """
 
-
+# DB 행 하나를 DraftPlayerOut 모델로 변환하는 함수. 
 def _row_to_draft_player(row) -> DraftPlayerOut:
-    """Converts a DB row into a DraftPlayerOut model."""
     r = row._mapping
-    raw_pos = r["position"] or "DH"
-    draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL")
-    ppa_value = float(r.get("value_score") or 0)
-    recommended_bid = int(r.get("recommended_bid") or 0)
-
+    
+    # 포지션 정보가 없는 선수는 DH(지명타자)로 간주
+    raw_pos = r["position"] or "DH"  
+    
+    # DB 포지션을 드래프트 포지션으로 매핑. 위에서 DH 처리 된건 자동 UTIL로 처리
+    draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL") 
+    
+    
     return DraftPlayerOut(
         id=str(r["player_id"]),
         name=r["full_name"],
         positions=[draft_pos],
-        recommendedBid=max(1, recommended_bid) if recommended_bid > 0 else 1,
+        recommendedBid=1,
         team=r["abbreviation"] or "",
         avg=round(float(r.get("AVG") or 0), 3) or None,
         hr=int(r.get("HR") or 0) or None,
         rbi=int(r.get("RBI") or 0) or None,
         sb=int(r.get("SB") or 0) or None,
-        ppaValue=round(ppa_value, 1),
+        ppaValue=0,
     )
 
 MOCK_DRAFT_POSITION_FILTERS: List[DraftPositionFilter] = [
@@ -285,9 +290,6 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
 
 
 
-
-
-
 def clear_user_caches(user_id: str) -> None:
     """Clears cached positions/slots for a user when picks change."""
     allowed_keys = [key for key in ALLOWED_POSITIONS_CACHE if key[0] == user_id]
@@ -296,17 +298,25 @@ def clear_user_caches(user_id: str) -> None:
     OCCUPIED_SLOTS_CACHE.pop(user_id, None)
 
 
+
+
+# DB에서 드래프트 픽 목록을 불러오는 함수. user_id로 특정 사용자가 생성한 드래프트 세션을 통째로 가져옴.
 def get_user_picks(user_id: str) -> List[DraftPickOut]:
-    """Loads all draft picks for a user from the database."""
+    
+    # 야구 선수 별 드래프트에 관련된 개별 정보를 다 가져옴 (스탯은 제외)
     rows = load_draft_picks(user_id)
+    
+    # load_draft_picks 함수에서 이미 dict 형식으로 반환해옴
+    # dict 형식에는 key & value
+    # 결론적으로 이 함수의 반환 값은 내가 생성한 타입 (DraftPickOut)으로 구성된 리스트
     return [
         DraftPickOut(
-            playerId=r["playerId"],
-            draftedByTeamId=r["draftedByTeamId"],
-            slotIndex=r["slotIndex"],
-            slotPos=r["slotPos"],
-            bid=r["bid"],
-            type=r["type"],
+            playerId=r["playerId"],               # 선수 ID
+            draftedByTeamId=r["draftedByTeamId"], # 해당 선수를 뽑은 팀 ID
+            slotIndex=r["slotIndex"],             # 슬롯 인덱스
+            slotPos=r["slotPos"],                 # 배정된 포지션
+            bid=r["bid"],                         # 입찰되었던 가격
+            type=r["type"],                       # 픽 유형
         )
         for r in rows
     ]
@@ -315,15 +325,22 @@ def get_user_picks(user_id: str) -> List[DraftPickOut]:
 def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:
     """Looks up a single player by player_id from the database."""
     from database.draft_store import engine
+    
+    # SQLAlchemy의 text() 함수 사용
+    # :player_id는 플레이스홀더로, 실제 값은 그 아래 execute()에서 전달
+    # 한 선수의 스탯 부터 모든 정보를 한번에 다 모아서 갖고옴
     sql = sa_text(f"""
         SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-               s.AVG, s.HR, s.RBI, s.SB, ppa.value_score, ppa.recommended_bid
+               s.AVG, s.HR, s.RBI, s.SB
         {_DRAFT_BASE_QUERY} AND p.player_id = :player_id
     """)
     with engine.connect() as conn:
         row = conn.execute(sql, {"player_id": int(player_id)}).fetchone()
+    
     if not row:
         return None
+    
+    
     return _row_to_draft_player(row)
 
 
@@ -474,7 +491,7 @@ def get_draft_players(
     # DATA
     data_sql = sa_text(f"""
         SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-               s.AVG, s.HR, s.RBI, s.SB, ppa.value_score, ppa.recommended_bid
+               s.AVG, s.HR, s.RBI, s.SB
         {_DRAFT_BASE_QUERY} {extra_where} {pos_sql}
         {sort_sql}
         LIMIT :limit OFFSET :offset
