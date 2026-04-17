@@ -3,9 +3,14 @@ uvicorn[standard]
 pydantic-settings
 python-dotenv
 
+httpx
+requests
+
 SQLAlchemy
 pymysql
 cryptography
 
 pytest
-httpx
+
+google-auth
+google-auth-httplib2
