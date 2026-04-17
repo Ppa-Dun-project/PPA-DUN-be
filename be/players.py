@@ -5,10 +5,10 @@
 import logging
 import os
 import re
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
@@ -59,50 +59,6 @@ class PlayerOut(BaseModel):
     headshotUrl: Optional[str] = None
     stats: PlayerStats
 
-# Used by player list/table cards. Key info displayed in the table row.
-class PlayerListItem(BaseModel):
-    id: int
-    name: str
-    team: str
-    positions: List[str]
-    valueScore: float
-    headshotUrl: Optional[str] = None
-
-# Paginated player list response.
-class PlayerListResponse(BaseModel):
-    items: List[PlayerListItem]
-    page: int
-    limit: int
-    total: int
-    totalPages: int
-
-
-# Used by PlayersToolbar position chips. Position filter options.
-class PlayerPositionFiltersResponse(BaseModel):
-    positions: List[str]
-
-# Used by PlayersToolbar sort dropdown.
-class PlayerSortOption(BaseModel):
-    value: str
-    label: str
-
-# Used by PlayersToolbar sort dropdown.
-class PlayerSortFiltersResponse(BaseModel):
-    sorts: List[PlayerSortOption]
-
-SortOrder = Literal["value_desc", "value_asc", "name_asc", "name_desc"]
-
-# Used by PlayersToolbar position chips.
-PLAYER_POSITION_FILTERS: List[str] = ["ALL", "C", "1B", "2B", "3B", "SS", "OF", "P", "DH"]
-
-# Used by PlayersToolbar sort dropdown.
-PLAYER_SORT_OPTIONS: List[PlayerSortOption] = [
-    PlayerSortOption(value="value_desc", label="ValueScore (high -> low)"),
-    PlayerSortOption(value="value_asc", label="ValueScore (low -> high)"),
-    PlayerSortOption(value="name_asc", label="Name (A -> Z)"),
-    PlayerSortOption(value="name_desc", label="Name (Z -> A)"),
-]
-
 # DB position -> UI filter mapping (LF, CF, RF -> OF)
 POSITION_TO_FILTER = {
     "LF": "OF", "CF": "OF", "RF": "OF",
@@ -116,46 +72,6 @@ def parse_height_to_inches(height_str: str) -> int:
     if match:
         return int(match.group(1)) * 12 + int(match.group(2))
     return 0
-
-
-def build_position_filter_sql(position: str) -> str:
-    """Returns SQL WHERE clause for the given position filter."""
-    if position == "ALL":
-        return ""
-    if position == "P":
-        return "AND p.position IN ('P', 'TWP')"
-    if position == "OF":
-        return "AND p.position IN ('OF', 'LF', 'CF', 'RF')"
-    return "AND p.position = :position"
-
-
-def build_sort_sql(sort: SortOrder) -> str:
-    """Returns SQL ORDER BY clause for the given sort option."""
-    if sort == "name_asc":
-        return "ORDER BY p.full_name ASC"
-    if sort == "name_desc":
-        return "ORDER BY p.full_name DESC"
-    if sort == "value_desc":
-        return "ORDER BY COALESCE(ppa.value_score, 0) DESC, p.full_name ASC"
-    if sort == "value_asc":
-        return "ORDER BY COALESCE(ppa.value_score, 0) ASC, p.full_name ASC"
-    return "ORDER BY p.full_name ASC"
-
-
-def row_to_player_list_item(row) -> PlayerListItem:
-    """Converts a DB row into a PlayerListItem model."""
-    r = row._mapping
-    raw_pos = r["position"] or "DH"
-    display_pos = POSITION_TO_FILTER.get(raw_pos, raw_pos)
-
-    return PlayerListItem(
-        id=r["player_id"],
-        name=r["full_name"],
-        team=r["abbreviation"] or "",
-        positions=[display_pos],
-        valueScore=round(float(r.get("value_score") or 0), 1),
-        headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
-    )
 
 
 def row_to_player_out(row) -> PlayerOut:
@@ -180,7 +96,7 @@ def row_to_player_out(row) -> PlayerOut:
         throws=r["pitch_hand"] or "R",
         team=r["abbreviation"] or "",
         positions=[display_pos],
-        valueScore=round(float(r.get("value_score") or 0), 1),
+        valueScore=0,
         headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
         stats=PlayerStats(
             g=0,
@@ -207,92 +123,15 @@ BASE_QUERY = """
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
-    LEFT JOIN player_ppa_scores ppa ON p.player_id = ppa.player_id
     WHERE p.active = 1
 """
 
-# List SELECT (includes PPA valueScore)
-LIST_SELECT = """
-    SELECT p.player_id, p.full_name, p.current_age, p.height, p.weight,
-           p.bat_side, p.pitch_hand, p.position, t.abbreviation,
-           ppa.value_score
-"""
-
-# Detail SELECT (full stats + PPA valueScore)
+# Detail SELECT (full stats)
 DETAIL_SELECT = """
     SELECT p.*, t.abbreviation,
            s.AB, s.R, s.H, s.HR, s.RBI, s.BB, s.K, s.SB,
-           s.AVG, s.OBP, s.SLG, ppa.value_score
+           s.AVG, s.OBP, s.SLG
 """
-
-
-# Used by PlayersToolbar. Returns all available player positions.
-@router.get("/filters/positions", response_model=PlayerPositionFiltersResponse)
-def get_player_position_filters():
-    return PlayerPositionFiltersResponse(positions=PLAYER_POSITION_FILTERS)
-
-
-# Used by PlayersToolbar. Returns all available sort options.
-@router.get("/filters/sorts", response_model=PlayerSortFiltersResponse)
-def get_player_sort_options():
-    return PlayerSortFiltersResponse(sorts=PLAYER_SORT_OPTIONS)
-
-
-# Used by player list page. Supports query/position/sort + pagination.
-@router.get("", response_model=PlayerListResponse)
-def get_players(
-    query: Optional[str] = Query(default=None),
-    position: str = Query(default="ALL"),
-    sort: SortOrder = Query(default="value_desc"),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=8, ge=1),
-):
-    keyword = (query or "").strip().lower()
-    normalized_position = position.strip().upper()
-
-    where_parts = []
-    params = {}
-
-    if keyword:
-        where_parts.append(
-            "(LOWER(p.full_name) LIKE :keyword OR LOWER(t.abbreviation) LIKE :keyword)"
-        )
-        params["keyword"] = f"%{keyword}%"
-
-    pos_sql = build_position_filter_sql(normalized_position)
-    if pos_sql and ":position" in pos_sql:
-        params["position"] = normalized_position
-
-    extra_where = (" AND " + " AND ".join(where_parts)) if where_parts else ""
-    sort_sql = build_sort_sql(sort)
-
-    count_sql = f"SELECT COUNT(*) {BASE_QUERY} {extra_where} {pos_sql}"
-    with engine.connect() as conn:
-        total = conn.execute(text(count_sql), params).scalar()
-
-    total_pages = (total + limit - 1) // limit if total > 0 else 0
-    safe_page = min(page, total_pages) if total_pages > 0 else 1
-    offset = (safe_page - 1) * limit if total_pages > 0 else 0
-
-    data_sql = f"""
-        {LIST_SELECT}
-        {BASE_QUERY} {extra_where} {pos_sql}
-        {sort_sql}
-        LIMIT :limit OFFSET :offset
-    """
-    params["limit"] = limit
-    params["offset"] = offset
-
-    with engine.connect() as conn:
-        rows = conn.execute(text(data_sql), params).fetchall()
-
-    return PlayerListResponse(
-        items=[row_to_player_list_item(r) for r in rows],
-        page=safe_page,
-        limit=limit,
-        total=total,
-        totalPages=total_pages,
-    )
 
 
 # Used by PlayerDetail page.
@@ -312,7 +151,7 @@ def get_player_detail(player_id: int):
 
 
 # Value endpoint called by the frontend PlayerInfoModal.
-# Returns the pre-calculated PPA valueScore from the player_ppa_scores table.
+# TODO: replace with real-time PPA API call
 class PlayerValueResponse(BaseModel):
     playerId: int
     name: str
@@ -321,20 +160,8 @@ class PlayerValueResponse(BaseModel):
 
 @router.get("/{player_id}/value", response_model=PlayerValueResponse)
 def get_player_value(player_id: int):
-    # Reads the PPA-calculated valueScore from the player_ppa_scores table.
-    ppa_sql = text("""
-        SELECT player_name, value_score
-        FROM player_ppa_scores
-        WHERE player_id = :player_id
-    """)
-    with engine.connect() as conn:
-        row = conn.execute(ppa_sql, {"player_id": player_id}).fetchone()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Player PPA score not found")
-
     return PlayerValueResponse(
         playerId=player_id,
-        name=row._mapping["player_name"],
-        valueScore=round(float(row._mapping["value_score"]), 1),
+        name="",
+        valueScore=0,
     )

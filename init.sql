@@ -179,19 +179,3 @@ CREATE TABLE IF NOT EXISTS `players_stats_nl_2025` (
     `FPTS`    INT           DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- ------------------------------------------------------------
--- 9. player_ppa_scores — PPA 가치 점수 및 추천 입찰가
--- ------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS `player_ppa_scores` (
-    `id`              INT           NOT NULL AUTO_INCREMENT,
-    `player_id`       INT           DEFAULT NULL,
-    `player_name`     VARCHAR(255)  DEFAULT NULL,
-    `team`            VARCHAR(255)  DEFAULT NULL,
-    `position`        VARCHAR(10)   DEFAULT NULL,
-    `value_score`     FLOAT         DEFAULT NULL,
-    `recommended_bid` INT           DEFAULT NULL,
-    `updated_at`      DATETIME      DEFAULT NULL,
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uq_player_id` (`player_id`),
-    KEY `idx_player_id` (`player_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
