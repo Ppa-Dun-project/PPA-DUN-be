@@ -4,6 +4,7 @@ pydantic-settings
 python-dotenv
 
 httpx
+requests
 
 SQLAlchemy
 pymysql
