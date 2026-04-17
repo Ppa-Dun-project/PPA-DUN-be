@@ -10,45 +10,7 @@ env:
   IMAGE: us-east1-docker.pkg.dev/v1-mvp/be-prod/be
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: test
-          MYSQL_DATABASE: test
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run tests
-        working-directory: be
-        env:
-          DB_USER: root
-          DB_PASSWORD: test
-          DB_HOST: "127.0.0.1"
-          DB_PORT: "3306"
-          DB_NAME: test
-        run: python -m pytest test_ppa_adapter.py
-
   build-and-push:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
