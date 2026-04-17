@@ -1,18 +1,16 @@
 # My Team page API router.
-# Shows the user's drafted players with filter/sort, and a budget summary
-# (total budget, amount spent, remaining). Used after the user drafts players.
-from typing import List, Literal, Optional
+# Returns the user's drafted roster and budget summary.
+# Filtering, sorting, and pagination are handled by the frontend.
+from typing import List, Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from draft import DEFAULT_DRAFT_CONFIG, find_draft_player, get_user_picks
 
-# Used by My Team page data requests.
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
 
 
-# Used by My Team table rows.
 class MyTeamPlayerOut(BaseModel):
     id: str
     name: str
@@ -28,91 +26,36 @@ class MyTeamPlayerOut(BaseModel):
 
 class MyTeamPlayersResponse(BaseModel):
     items: List[MyTeamPlayerOut]
-    page: int
-    limit: int
-    total: int
-    totalPages: int
     totalBudget: int
     spentBudget: int
     remainingBudget: int
 
 
-class MyTeamPositionsResponse(BaseModel):
-    positions: List[str]
-
-
-class MyTeamSortOption(BaseModel):
-    value: str
-    label: str
-
-
-class MyTeamSortOptionsResponse(BaseModel):
-    sorts: List[MyTeamSortOption]
-
-
-class MyTeamSummaryResponse(BaseModel):
-    totalBudget: int
-    spentBudget: int
-    remainingBudget: int
-    playerCount: int
-
-
-MyTeamSort = Literal[
-    "score_desc",
-    "score_asc",
-    "cost_desc",
-    "cost_asc",
-    "avg_desc",
-    "hr_desc",
-    "rbi_desc",
-    "sb_desc",
-]
-
-MY_TEAM_POSITIONS = [
-    "ALL",
-    "C",
-    "1B",
-    "2B",
-    "3B",
-    "SS",
-    "OF",
-    "UTIL",
-    "SP",
-    "RP",
-    "LF",
-    "RF",
-    "CF",
-    "DH",
-]
-
-MY_TEAM_SORT_OPTIONS: List[MyTeamSortOption] = [
-    MyTeamSortOption(value="score_desc", label="By Score (desc)"),
-    MyTeamSortOption(value="score_asc", label="By Score (asc)"),
-    MyTeamSortOption(value="cost_desc", label="By Value $ (desc)"),
-    MyTeamSortOption(value="cost_asc", label="By Value $ (asc)"),
-    MyTeamSortOption(value="avg_desc", label="By AVG"),
-    MyTeamSortOption(value="hr_desc", label="By HR"),
-    MyTeamSortOption(value="rbi_desc", label="By RBI"),
-    MyTeamSortOption(value="sb_desc", label="By SB"),
-]
-
-def draft_pick_to_my_team_player(player_id: str, slot_pos: str, bid: Optional[int]) -> Optional[MyTeamPlayerOut]:
+# ID를 통해 야구 선수의 드래프트 정보 + 스탯 정보 불러옴
+def player_drafts_stats_collection(
+    player_id: str,
+    slot_pos: str,
+    bid: Optional[int],
+) -> Optional[MyTeamPlayerOut]:
+    
+    # DraftPlayerOut 타입의 객체 반환
     draft_player = find_draft_player(player_id)
+
     if not draft_player:
         return None
 
+    # 벤치 선수는 원래 포지션을 괄호 안에 표시 (예: "BENCH(1B)")
     if slot_pos == "BENCH":
-        position = draft_player.positions[0] if draft_player.positions else "UTIL"
+        original_pos = draft_player.positions[0] if draft_player.positions else "UTIL"
+        position = f"BENCH({original_pos})"
     else:
         position = slot_pos
-
-    resolved_cost = bid if isinstance(bid, int) else draft_player.recommendedBid
 
     return MyTeamPlayerOut(
         id=draft_player.id,
         name=draft_player.name,
         pos=position,
-        cost=max(0, int(resolved_cost)),
+        cost=int(bid or 0),
         team=draft_player.team,
         avg=float(draft_player.avg or 0.0),
         hr=int(draft_player.hr or 0),
@@ -121,128 +64,64 @@ def draft_pick_to_my_team_player(player_id: str, slot_pos: str, bid: Optional[in
         ppaValue=float(draft_player.ppaValue),
     )
 
+# 사용자(나) 가 드래프트 한 선수 목록과 스탯 데이터 뽑아내기
+def pick_my_players(user_id: str) -> List[MyTeamPlayerOut]:
+    
+    # user_id 사용자가 생성한 드래프트 세션에 속한 선수들을 통째로 가져옴
+    picks = get_user_picks(user_id)
+    
+    # 그 중에서 내 팀에 드래프트 된 선수만 골라냄
+    my_picks = []
+    for pick in picks:
+        if pick.draftedByTeamId == "team-0":
+            my_picks.append(pick)
 
-def build_my_team_players(room_id: str, my_team_id: str) -> List[MyTeamPlayerOut]:
-    picks = get_user_picks(room_id)
-    mine = sorted(
-        (pick for pick in picks if pick.draftedByTeamId == my_team_id),
-        key=lambda pick: pick.slotIndex,
-    )
+    # 내 팀 골라낸거 깔끔하게 정렬
+    mine = sorted(my_picks, key=lambda pick: pick.slotIndex)
 
     items: List[MyTeamPlayerOut] = []
+    
+    # 위에서 선수들의 드래프트 정보만 가져왔으므로, 선수별 스탯 정보가 포함된걸로 다시 가져옴
     for pick in mine:
-        mapped = draft_pick_to_my_team_player(
+        mapped = player_drafts_stats_collection(
             player_id=pick.playerId,
             slot_pos=pick.slotPos,
             bid=pick.bid,
         )
         if mapped:
             items.append(mapped)
+
     return items
 
-
-def sort_my_team(players: List[MyTeamPlayerOut], sort: MyTeamSort) -> List[MyTeamPlayerOut]:
-    if sort == "score_desc":
-        return sorted(players, key=lambda p: p.ppaValue, reverse=True)
-    if sort == "score_asc":
-        return sorted(players, key=lambda p: p.ppaValue)
-    if sort == "cost_desc":
-        return sorted(players, key=lambda p: p.cost, reverse=True)
-    if sort == "cost_asc":
-        return sorted(players, key=lambda p: p.cost)
-    if sort == "avg_desc":
-        return sorted(players, key=lambda p: p.avg, reverse=True)
-    if sort == "hr_desc":
-        return sorted(players, key=lambda p: p.hr, reverse=True)
-    if sort == "rbi_desc":
-        return sorted(players, key=lambda p: p.rbi, reverse=True)
-    if sort == "sb_desc":
-        return sorted(players, key=lambda p: p.sb, reverse=True)
-    return players
-
-
+# 선수별 cost 다 더해서 
 def get_budget_summary(players: List[MyTeamPlayerOut], total_budget: int) -> tuple[int, int, int]:
-    spent = sum(p.cost for p in players)
+    # 뽑은 선수별 cost 다 더해서 사용한 예산 계산
+    spent = sum(player.cost for player in players)
+    
+    # 전체 예산에서 사용한 예산 빼서 남은 예산 계산
     remaining = max(0, total_budget - spent)
     return total_budget, spent, remaining
 
-
-# Used by MyTeamPage data table. Handles query/position/sort server-side.
+# 프론트엔드의 MyTeamPage.tsx 79-84에서 사용 (컴포넌트 최초 마운트 될때 실행되는 useEffect)
 @router.get("/players", response_model=MyTeamPlayersResponse)
 def get_my_team_players(
-    query: Optional[str] = Query(default=None),
-    position: str = Query(default="ALL"),
-    sort: MyTeamSort = Query(default="score_desc"),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=50, ge=1),
-    room_id: str = Query(default="default", alias="roomId"),
-    my_team_id: str = Query(default="team-0", alias="myTeamId"),
+    user_id: str = Query(default="default", alias="roomId"),
 ):
-    source_players = build_my_team_players(room_id=room_id, my_team_id=my_team_id)
-    keyword = (query or "").strip().lower()
-    normalized_position = position.strip().upper()
-
-    filtered = []
-    for player in source_players:
-        matches_keyword = (
-            not keyword
-            or keyword in player.name.lower()
-            or keyword in player.team.lower()
-        )
-        matches_position = normalized_position == "ALL" or player.pos.upper() == normalized_position
-        if matches_keyword and matches_position:
-            filtered.append(player)
-
-    sorted_players = sort_my_team(filtered, sort)
-    total = len(sorted_players)
-    total_pages = (total + limit - 1) // limit if total > 0 else 0
-    safe_page = min(page, total_pages) if total_pages > 0 else 1
-    start = (safe_page - 1) * limit if total_pages > 0 else 0
-    end = start + limit
-    paged = sorted_players[start:end]
-
+    # 내가 뽑은 선수 가져옴 (선수별 cost 이용하려고)
+    source_players = pick_my_players(user_id=user_id)
+    
+    # 예산 요약 계산
     total_budget, spent_budget, remaining_budget = get_budget_summary(
         source_players,
         DEFAULT_DRAFT_CONFIG.budget,
     )
+
+    # 내 선수, 전체 예산, 사용 예산, 잔여 예산
     return MyTeamPlayersResponse(
-        items=paged,
-        page=safe_page,
-        limit=limit,
-        total=total,
-        totalPages=total_pages,
+        items=source_players,
         totalBudget=total_budget,
         spentBudget=spent_budget,
         remainingBudget=remaining_budget,
     )
 
 
-# Used by MyTeamPage position chips.
-@router.get("/filters/positions", response_model=MyTeamPositionsResponse)
-def get_my_team_position_filters():
-    return MyTeamPositionsResponse(positions=MY_TEAM_POSITIONS)
-
-
-# Used by MyTeamPage sort dropdown.
-@router.get("/filters/sorts", response_model=MyTeamSortOptionsResponse)
-def get_my_team_sort_options():
-    return MyTeamSortOptionsResponse(sorts=MY_TEAM_SORT_OPTIONS)
-
-
-# Used by MyTeamPage budget widget.
-@router.get("/summary", response_model=MyTeamSummaryResponse)
-def get_my_team_summary(
-    room_id: str = Query(default="default", alias="roomId"),
-    my_team_id: str = Query(default="team-0", alias="myTeamId"),
-):
-    source_players = build_my_team_players(room_id=room_id, my_team_id=my_team_id)
-    total_budget, spent_budget, remaining_budget = get_budget_summary(
-        source_players,
-        DEFAULT_DRAFT_CONFIG.budget,
-    )
-    return MyTeamSummaryResponse(
-        totalBudget=total_budget,
-        spentBudget=spent_budget,
-        remainingBudget=remaining_budget,
-        playerCount=len(source_players),
-    )
