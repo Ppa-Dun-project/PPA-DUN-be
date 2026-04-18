@@ -157,9 +157,32 @@ CREATE TABLE IF NOT EXISTS `draft_picks` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
--- 8. players_stats_nl_2025 — 2025 시즌 선수 스탯 (타격 통계)
+-- 8. players_stats_nl_2025 — 2025 시즌 NL 선수 스탯 (타격 통계)
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `players_stats_nl_2025` (
+    `Player`  VARCHAR(100)  DEFAULT NULL,
+    `AB`      INT           DEFAULT NULL,
+    `R`       INT           DEFAULT NULL,
+    `H`       INT           DEFAULT NULL,
+    `1B`      INT           DEFAULT NULL,
+    `2B`      INT           DEFAULT NULL,
+    `3B`      INT           DEFAULT NULL,
+    `HR`      INT           DEFAULT NULL,
+    `RBI`     INT           DEFAULT NULL,
+    `BB`      INT           DEFAULT NULL,
+    `K`       INT           DEFAULT NULL,
+    `SB`      INT           DEFAULT NULL,
+    `CS`      INT           DEFAULT NULL,
+    `AVG`     FLOAT         DEFAULT NULL,
+    `OBP`     FLOAT         DEFAULT NULL,
+    `SLG`     FLOAT         DEFAULT NULL,
+    `FPTS`    INT           DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 9. players_stats_al_2025 — 2025 시즌 AL 선수 스탯 (타격 통계)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `players_stats_al_2025` (
     `Player`  VARCHAR(100)  DEFAULT NULL,
     `AB`      INT           DEFAULT NULL,
     `R`       INT           DEFAULT NULL,
