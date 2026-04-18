@@ -5,7 +5,7 @@ from auth import router as auth_router
 from draft import router as draft_router
 from home import router as home_router
 from myteam import router as myteam_router
-from players import router as players_router
+from backend.be.playerinfo import router as players_router
 
 from core.config import settings
 from db.session import engine, Base
