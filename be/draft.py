@@ -163,7 +163,17 @@ def _draft_sort_sql(sort: str) -> str:
 _DRAFT_BASE_QUERY = """
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
-    LEFT JOIN players_stats_nl_2025 s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+    LEFT JOIN (
+        SELECT Player,
+               SUM(HR)  AS HR,  SUM(RBI) AS RBI, SUM(SB) AS SB,
+               SUM(H) / NULLIF(SUM(AB), 0) AS AVG
+        FROM (
+            SELECT * FROM players_stats_nl_2025
+            UNION ALL
+            SELECT * FROM players_stats_al_2025
+        ) combined
+        GROUP BY Player
+    ) s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
     WHERE p.active = 1
 """
 
@@ -221,8 +231,8 @@ DEFAULT_DRAFT_CONFIG = DraftConfigOut(
     rosterPlayers=23,
     myTeamName="PPA-DUN",
     oppTeamName="Opponent 1",
-    opponentsCount=5,
-    oppTeamNames=["Opponent 1", "Opponent 2", "Opponent 3", "Opponent 4", "Opponent 5"],
+    opponentsCount=1,
+    oppTeamNames=["Opponent 1"],
 )
 
 
