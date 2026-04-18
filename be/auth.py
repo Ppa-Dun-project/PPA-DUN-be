@@ -1,17 +1,19 @@
 import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from google.oauth2 import id_token
 from google.auth.transport import requests
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
-from core.config import settings
 from db.session import get_db
 from db.models import User
 
+load_dotenv()
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-GOOGLE_CLIENT_ID = settings.GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 
 # ── Request / Response Models ─────────────────────────────────────────────────
