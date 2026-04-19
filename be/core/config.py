@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str = ""
     DATABASE_URL: str = "mysql+pymysql://root:1234@localhost:3306/ppadun"
 
+    GCP_PROJECT_ID: str = ""
+    GCP_LOCATION: str = "us-east1"
+    VERTEX_AI_MODEL: str = "gemini-2.0-flash-001"
+
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
