@@ -41,6 +41,7 @@ class PlayerStats(BaseModel):
     bb: int = 0         # 볼넷
     k: int = 0          # 삼진
     sb: int = 0         # 도루
+    cs: int = 0         # 도루 실패 (Caught Stealing)
     avg: float = 0.0    # 타율
     obp: float = 0.0    # 출루율
     slg: float = 0.0    # 장타율
@@ -123,6 +124,7 @@ def row_to_player_out(player_personal_info, stats: dict) -> PlayerOut:
             bb=bb,
             k=stats.get("K") or 0,
             sb=stats.get("SB") or 0,
+            cs=stats.get("CS") or 0,
             avg=round(float(stats.get("AVG") or 0), 3),
             obp=round(float(obp), 3),
             slg=round(float(slg), 3),
@@ -152,7 +154,7 @@ def merge_stats(nl_row, al_row) -> dict:
 
     # 선수의 리그별 스탯 dict에 합산하여 저장 (NL + AL 통합과정)
     merged: dict = {}
-    for col in ("AB", "R", "H", "1B", "2B", "3B", "HR", "RBI", "BB", "K", "SB"):
+    for col in ("AB", "R", "H", "1B", "2B", "3B", "HR", "RBI", "BB", "K", "SB", "CS"):
         merged[col] = (nl.get(col) or 0) + (al.get(col) or 0)
 
     ab, bb = merged["AB"], merged["BB"]

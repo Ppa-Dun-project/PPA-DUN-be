@@ -105,7 +105,7 @@ def get_budget_summary(players: List[MyTeamPlayerOut], total_budget: int) -> tup
 # 프론트엔드의 MyTeamPage.tsx 79-84에서 사용 (컴포넌트 최초 마운트 될때 실행되는 useEffect)
 @router.get("/players", response_model=MyTeamPlayersResponse)
 def get_my_team_players(
-    user_id: str = Query(default="default", alias="roomId"),
+    user_id: str = Query(default="default", alias="userId"),
 ):
     # 내가 뽑은 선수 가져옴 (선수별 cost 이용하려고)
     source_players = pick_my_players(user_id=user_id)
