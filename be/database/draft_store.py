@@ -66,7 +66,7 @@ def ensure_draft_tables():
 
 
 # ── draft_config CRUD ──
-
+# draft_config 테이블에 저장
 def save_draft_config(
     user_id: str,
     league_type: str,

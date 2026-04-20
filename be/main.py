@@ -1,18 +1,22 @@
 ﻿# FastAPI application entry point.
 # Registers all page routers (draft, home, myteam, players, ppa) and
 # configures CORS middleware so the frontend dev server can reach the backend.
+import os
+
 from auth import router as auth_router
 from draft import router as draft_router
 from home import router as home_router
 from myteam import router as myteam_router
-from players import router as players_router
+from playerinfo import router as players_router
 
-from core.config import settings
 from db.session import engine, Base
 from db.models import User  # noqa: F401 — import so SQLAlchemy registers the table
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
 
 # Auto-create all DB tables on startup (if they don't exist yet)
 Base.metadata.create_all(bind=engine)
@@ -51,7 +55,7 @@ def health():
 app.add_middleware(
     CORSMiddleware,
     # 어떤 출처에서 오는 요청을 허용할지
-    allow_origins=_parse_cors_origins(settings.CORS_ORIGINS),
+    allow_origins=_parse_cors_origins(os.getenv("CORS_ORIGINS", "")),
 
     # 쿠키/인증 정보 포함 허용 여부
     allow_credentials=True,
