@@ -15,17 +15,6 @@ from sqlalchemy import text as sa_text
 router = APIRouter(prefix="/api/draft", tags=["draft"])
 
 DraftPosition = Literal["C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP", "BENCH"]
-DraftPositionFilter = Literal["ALL", "C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP"]
-DraftSort = Literal[
-    "score_desc",
-    "score_asc",
-    "cost_desc",
-    "cost_asc",
-    "avg_desc",
-    "hr_desc",
-    "rbi_desc",
-    "sb_desc",
-]
 DraftPickType = Literal["mine", "taken"]
 
 
@@ -58,14 +47,6 @@ class DraftPlayerOut(BaseModel):
 
 class DraftPlayerListResponse(BaseModel):
     items: List[DraftPlayerOut]
-    page: int
-    limit: int
-    total: int
-    totalPages: int
-
-class DraftSortOption(BaseModel):
-    value: str
-    label: str
 
 # 선수의 픽 상태 (어떤 팀이 픽했는지, 어떤 포지션에 배치됐는지, 가격은 얼마인지 등)
 class DraftPickOut(BaseModel):
@@ -90,8 +71,6 @@ class DraftPicksResponse(BaseModel):
 class DraftBootstrapResponse(BaseModel):
     config: DraftConfigOut
     teams: List[DraftTeamOut]
-    positionFilters: List[str]
-    sortOptions: List[DraftSortOption]
     picks: List[DraftPickOut]
 
 
@@ -103,58 +82,31 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "P": "SP",
 }
 
-# 드래프트 페이지 포지션별 필터링
-# SP와 RP는 P로 통일, OF는 LF/CF/RF 통일, IF는 SS로 통일, UTIL은 모든 선수 
-def _draft_position_filter_sql(position: str) -> str:
-    if position == "ALL":
-        return ""
-    if position == "SP":
-        return "AND p.position = 'P'"
-    if position == "RP":
-        return "AND p.position = 'P'"
-    if position == "OF":
-        return "AND p.position IN ('OF','LF','CF','RF')"
-    if position == "UTIL":
-        return ""  # UTIL allows all players
-    return f"AND p.position = :position"
-
-# Builds SQL ORDER BY clause for draft player sorting
-def _draft_sort_sql(sort: str) -> str:
-    if sort == "score_desc":
-        return "ORDER BY p.full_name DESC, p.full_name ASC"
-    if sort == "score_asc":
-        return "ORDER BY p.full_name ASC, p.full_name ASC"
-    if sort == "cost_desc":
-        return "ORDER BY p.full_name DESC, p.full_name ASC"
-    if sort == "cost_asc":
-        return "ORDER BY p.full_name ASC, p.full_name ASC"
-    if sort == "avg_desc":
-        return "ORDER BY COALESCE(s.AVG, 0) DESC, p.full_name ASC"
-    if sort == "hr_desc":
-        return "ORDER BY COALESCE(s.HR, 0) DESC, p.full_name ASC"
-    if sort == "rbi_desc":
-        return "ORDER BY COALESCE(s.RBI, 0) DESC, p.full_name ASC"
-    if sort == "sb_desc":
-        return "ORDER BY COALESCE(s.SB, 0) DESC, p.full_name ASC"
-    return "ORDER BY p.full_name DESC, p.full_name ASC"
-
-
 # active 칼럼: 1이면 현역, 0이면 은퇴/방출
-# 현역인 선수들 중 
-_DRAFT_BASE_QUERY = """
+# Avoid SELECT * / LIKE joins here: they force broader scans and break against the
+# current stats schema where NL/AL tables do not share identical columns.
+_DRAFT_STATS_QUERY = """
+    SELECT player_name,
+           SUM(HR) AS HR,
+           SUM(RBI) AS RBI,
+           SUM(SB) AS SB,
+           SUM(H) / NULLIF(SUM(AB), 0) AS AVG
+    FROM (
+        SELECT TRIM(Name) AS player_name, AB, H, HR, RBI, SB
+        FROM players_stats_nl_2025
+        UNION ALL
+        SELECT TRIM(Name) AS player_name, AB, H, HR, RBI, SB
+        FROM players_stats_al_2025
+    ) combined
+    GROUP BY player_name
+"""
+
+_DRAFT_BASE_QUERY = f"""
     FROM mlb_players_list p
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN (
-        SELECT Player,
-               SUM(HR)  AS HR,  SUM(RBI) AS RBI, SUM(SB) AS SB,
-               SUM(H) / NULLIF(SUM(AB), 0) AS AVG
-        FROM (
-            SELECT * FROM players_stats_nl_2025
-            UNION ALL
-            SELECT * FROM players_stats_al_2025
-        ) combined
-        GROUP BY Player
-    ) s ON LOWER(s.Player) LIKE CONCAT(LOWER(p.full_name), ' %')
+        {_DRAFT_STATS_QUERY}
+    ) s ON s.player_name = p.full_name
     WHERE p.active = 1
 """
 
@@ -182,30 +134,7 @@ def _row_to_draft_player(row) -> DraftPlayerOut:
         ppaValue=0,
     )
 
-DRAFT_POSITION_FILTERS: List[DraftPositionFilter] = [
-    "ALL",
-    "C",
-    "1B",
-    "2B",
-    "3B",
-    "SS",
-    "OF",
-    "UTIL",
-    "SP",   # Starting Pitcher (선발 투수)
-    "RP",   # Relief Pitcher (구원 투수)
-]
-
-DRAFT_SORT_OPTIONS: List[DraftSortOption] = [
-    DraftSortOption(value="score_desc", label="By Score (desc)"),
-    DraftSortOption(value="score_asc", label="By Score (asc)"),
-    DraftSortOption(value="cost_desc", label="By Draft Cost (desc)"),
-    DraftSortOption(value="cost_asc", label="By Draft Cost (asc)"),
-    DraftSortOption(value="avg_desc", label="By AVG"),
-    DraftSortOption(value="hr_desc", label="By HR"),
-    DraftSortOption(value="rbi_desc", label="By RBI"),
-    DraftSortOption(value="sb_desc", label="By SB"),
-]
-
+# 아무 설정도 하지 않았을때의 기본 드래프트 세션 설정
 DEFAULT_DRAFT_CONFIG = DraftConfigOut(
     leagueType="standard",
     budget=260,
@@ -226,8 +155,6 @@ from database.draft_store import (
     reset_draft,
 )
 ensure_draft_tables()
-
-DEFAULT_MY_TEAM_ID = "team-0"
 
 SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "SP",
@@ -270,7 +197,7 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
     # 전체 team 정보 모을 리스트 선언
     # 내 팀 정보 먼저 추가 (항상 team-0, isMine=True)
     teams: List[DraftTeamOut] = [
-        DraftTeamOut(id=DEFAULT_MY_TEAM_ID, name=my_team_name or "My Team", isMine=True)
+        DraftTeamOut(id="team-0", name=my_team_name or "My Team", isMine=True)
     ]
     
     # 상대 팀 정보 추가 (team-1, team-2, ... / isMine=False)
@@ -430,98 +357,24 @@ def get_draft_bootstrap(
     return DraftBootstrapResponse(
         config=config,
         teams=teams,
-        positionFilters=DRAFT_POSITION_FILTERS,
-        sortOptions=DRAFT_SORT_OPTIONS,
         picks=picks,
     )
 
 
 ############################ 선수 데이터 #############################
+# 현역 선수 전체를 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
 @router.get("/players", response_model=DraftPlayerListResponse)
-def get_draft_players(
-    name: Optional[str] = Query(default=None, alias="query"),
-    position: DraftPositionFilter = Query(default="ALL"),
-    sort: DraftSort = Query(default="score_desc"),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=50, ge=1),
-):
-    normalized_name = (name or "").strip().lower()
-    normalized_position = position.upper()
-
-    # 선수 데이터 조회 시, 포지션 별 필터링을 고려하여 SQL 쿼리 조각 생성
-    where_parts = []
-    params: Dict = {}
-
-    # 사용자가 선수 검색 시 사용할 쿼리 조각 (그냥 드래프트 페이지 접속에는 이게 null로 들어감)
-    # 선수 풀네임을 입력하지 않을때도 작동하도록 로직 (SQLAlchemy)
-    if normalized_name:
-        where_parts.append(
-            "(LOWER(p.full_name) LIKE :normalized_name OR LOWER(t.abbreviation) LIKE :normalized_name)"
-        )
-        params["normalized_name"] = f"%{normalized_name}%"
-
-    pos_sql = _draft_position_filter_sql(normalized_position)
-    
-    # pos_sql 안에 :position이 포함되어 있다면, 그때만 position 값을 params에 추가 (파이썬 연산자)
-    # 즉 all 같은 경우에는 position 필터링이 없으므로 params에 position이 필요 없어서 안 넣어주는 로직
-    if pos_sql and ":position" in pos_sql:
-        params["position"] = normalized_position
-
-    # 검색/필터 조건들(where_parts)을 " AND "로 이어붙여 기본 쿼리에 덧붙일 조각.
-    # 조건이 없으면 빈 문자열 → "AND"만 남아 문법 오류 나는 경우 방지.
-    # .join의 경우, ()안에 들어가는 원소 2개 이상부터 AND 삽입.
-    if where_parts:
-        extra_where = " AND " + " AND ".join(where_parts)
-    else:
-        extra_where = ""
-    
-    # 드래프트 페이지 선수 목록 정렬 옵션에 따른 SQL 쿼리 조각
-    sort_sql = _draft_sort_sql(sort)
-
-    # 필터 조건에 맞는 선수 수를 세는 최종 SQL 쿼리 완성
-    count_sql = sa_text(f"SELECT COUNT(*) {_DRAFT_BASE_QUERY} {extra_where} {pos_sql}")
-    
-    # 쿼리 실행
-    with engine.connect() as conn:
-        total = conn.execute(count_sql, params).scalar()
-
-    # total: DB에서 센 전체 행 개수 / page: 프론트가 요청한 페이지 번호 / limit: 페이지당 표시할 행 수
-    # 선수 수 / 페이지당 표시할 선수 수 후, 나머지가 있으면 페이지 +1 
-    if total > 0:
-        if total % limit > 0:
-            total_pages = total // limit + 1
-        else:
-            total_pages = total // limit
-    else:
-        total_pages = 0
-    
-    # 페이지 요청이 잘
-    safe_page = min(page, total_pages) if total_pages > 0 else 1
-    offset = (safe_page - 1) * limit if total_pages > 0 else 0
-
-    # DATA
+def get_draft_players():
     data_sql = sa_text(f"""
         SELECT p.player_id, p.full_name, p.position, t.abbreviation,
                s.AVG, s.HR, s.RBI, s.SB
-        {_DRAFT_BASE_QUERY} {extra_where} {pos_sql}
-        {sort_sql}
-        LIMIT :limit OFFSET :offset
+        {_DRAFT_BASE_QUERY}
     """)
-    params["limit"] = limit
-    params["offset"] = offset
-
     with engine.connect() as conn:
-        rows = conn.execute(data_sql, params).fetchall()
+        rows = conn.execute(data_sql).fetchall()
 
-    paged = [_row_to_draft_player(r) for r in rows]
-
-    return DraftPlayerListResponse(
-        items=paged,
-        page=safe_page,
-        limit=limit,
-        total=total,
-        totalPages=total_pages,
-    )
+    items = [_row_to_draft_player(r) for r in rows]
+    return DraftPlayerListResponse(items=items)
 
 
 ########################## 드래프트에서 선수 픽 등록/수정 (Add/Taken) ##########################
@@ -571,8 +424,6 @@ def upsert_draft_pick_endpoint(
     
     
     ########################### 드래프트 한 선수 위치 변경 ############################
-    # 선수를 포지션 별로 드래프트 하지 않고, 그걸 나타내지 않는다면, 불편할 것 같음.
-    # 그리고 만약 포지션 별로 드래프트 하는 걸로 변경한다면, find_available_slot_index 함수 로직 변경 해야 함
     # 현재는 그냥 가장 먼저 나오는 빈 슬롯에 배치하는 걸로 되어 있음. (포지션 규칙 없이)
     resolved_slot_index = find_available_slot_index(
         payload.slotPos,
