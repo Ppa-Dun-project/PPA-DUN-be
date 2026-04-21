@@ -131,7 +131,7 @@ def _row_to_draft_player(row) -> DraftPlayerOut:
         hr=int(r.get("HR") or 0) or None,
         rbi=int(r.get("RBI") or 0) or None,
         sb=int(r.get("SB") or 0) or None,
-        ppaValue=0,
+        ppaValue=2.0,
     )
 
 # DB-backed draft storage
