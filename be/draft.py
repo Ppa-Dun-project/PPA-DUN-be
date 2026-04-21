@@ -134,17 +134,6 @@ def _row_to_draft_player(row) -> DraftPlayerOut:
         ppaValue=0,
     )
 
-# 아무 설정도 하지 않았을때의 기본 드래프트 세션 설정
-DEFAULT_DRAFT_CONFIG = DraftConfigOut(
-    leagueType="standard",
-    budget=260,
-    rosterPlayers=23,
-    myTeamName="PPA-DUN",
-    opponentsCount=0,
-    oppTeamNames=[],
-)
-
-
 # DB-backed draft storage
 from database.draft_store import (
     ensure_draft_tables,
@@ -185,9 +174,7 @@ SLOT_TEMPLATE_BASE: List[DraftPosition] = [
 ]
 
 # Clamps a number to a given range. Ensures user input stays within valid bounds.
-def clamp_int(value: Optional[int], min_value: int, max_value: int, fallback: int) -> int:
-    if value is None:
-        return fallback
+def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, int(value)))
 
 
@@ -266,43 +253,41 @@ def find_available_slot_index(
 
 # 드래프트 세션 normalizing
 def normalized_config(
-    league_type: Optional[str],
-    budget: Optional[int],
-    roster_players: Optional[int],
-    my_team_name: Optional[str],
+    league_type: str,
+    budget: int,
+    roster_players: int,
+    my_team_name: str,
     opp_team_names: List[str],
-    opponents_count: Optional[int],
+    opponents_count: int,
 ) -> Tuple[DraftConfigOut, List[DraftTeamOut]]:
 
     # 사용자가 최대, 최소 범위를 벗어날 경우 normalization
-    normalized_budget = clamp_int(budget, 50, 600, DEFAULT_DRAFT_CONFIG.budget)
-    normalized_roster = clamp_int(roster_players, 12, 35, DEFAULT_DRAFT_CONFIG.rosterPlayers)
-    normalized_opponents = clamp_int(opponents_count, 0, 12, DEFAULT_DRAFT_CONFIG.opponentsCount)
+    normalized_budget = clamp_int(budget, 50, 600)
+    normalized_roster = clamp_int(roster_players, 12, 35)
+    normalized_opponents = clamp_int(opponents_count, 0, 12)
 
     # 전체 팀 정보 리스트
     teams = build_draft_teams(
-        my_team_name=(my_team_name or "").strip() or DEFAULT_DRAFT_CONFIG.myTeamName,
+        my_team_name=my_team_name.strip(),
         opp_team_names=opp_team_names,
         opponents_count=normalized_opponents,
     )
-    
+
     # team-id, isMine, 누락 이름 자동 생성, opponents_count 기반 잘라내기 과정을 거친 상대팀 이름 리스트
     opps = [t.name for t in teams if not t.isMine]
 
     # 전체 드래프트 설정 정보 (config) 객체 최종 생성
     config = DraftConfigOut(
-        leagueType=league_type or DEFAULT_DRAFT_CONFIG.leagueType,
+        leagueType=league_type,
         budget=normalized_budget,
         rosterPlayers=normalized_roster,
         myTeamName=teams[0].name,
         opponentsCount=normalized_opponents,
         oppTeamNames=opps,
     )
-    
+
     # 드래프트 설정 정보 + 전체 팀 정보 반환
     return config, teams
-
-
 
 
 
@@ -312,12 +297,12 @@ def normalized_config(
 # 드래프트 페이지 초기 마운트시 프론트가 가장 먼저 호출하는 통합 엔드포인트
 @router.get("/bootstrap", response_model=DraftBootstrapResponse)
 def get_draft_bootstrap(
-    league_type: Optional[str] = Query(default=None, alias="leagueType"),
-    budget: Optional[int] = Query(default=None),
-    roster_players: Optional[int] = Query(default=None, alias="rosterPlayers"),
-    my_team_name: Optional[str] = Query(default=None, alias="myTeamName"),
+    league_type: str = Query(alias="leagueType"),
+    budget: int = Query(),
+    roster_players: int = Query(alias="rosterPlayers"),
+    my_team_name: str = Query(alias="myTeamName"),
     opp_team_names_raw: str = Query(default="", alias="oppTeamNames"),
-    opponents_count: Optional[int] = Query(default=None, alias="opponentsCount"),
+    opponents_count: int = Query(alias="opponentsCount"),
     user_id: str = Query(default="default", alias="userId"),
 ):
     
@@ -383,7 +368,7 @@ def get_draft_players():
 def upsert_draft_pick_endpoint(
     payload: DraftPickUpsertIn,
     user_id: str = Query(default="default", alias="userId"),
-    roster_players: Optional[int] = Query(default=None, alias="rosterPlayers"),
+    roster_players: int = Query(alias="rosterPlayers", gt=0),
 ):
     # 선수의 요약된 스탯 정보를 불러옴
     player = find_draft_player(payload.playerId)
@@ -403,15 +388,9 @@ def upsert_draft_pick_endpoint(
         if pick.playerId != payload.playerId:
             next_picks.append(pick)
     
-    # roster_players가 None/0/음수이면 기본값으로 폴백.
-    # 슬라이스가 리스트 길이를 자연스럽게 상한으로 처리하므로 상한 clamp는 불필요.
-    if roster_players and roster_players > 0:
-        roster_slots = roster_players
-    else:
-        roster_slots = DEFAULT_DRAFT_CONFIG.rosterPlayers
-
     # roster 야구 선수 수에 따라 슬롯 템플릿 자름. 만약 23명보다 적다면 뒤에 있는 BENCH 슬롯부터 사라짐.
-    slot_template = SLOT_TEMPLATE_BASE[:roster_slots]
+    # 슬라이스가 리스트 길이를 자연스럽게 상한으로 처리하므로 상한 clamp는 불필요.
+    slot_template = SLOT_TEMPLATE_BASE[:roster_players]
     
     
     # 이 팀(draftedByTeamId)이 이미 차지한 슬롯 번호들을 집합으로 모음.

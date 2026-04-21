@@ -180,7 +180,7 @@ def get_player_detail(player_id: int):
     """
     stats_sql_template = """
         SELECT * FROM {table}
-        WHERE LOWER(Player) LIKE CONCAT(LOWER(:full_name), ' %')
+        WHERE LOWER(Name) LIKE CONCAT(LOWER(:full_name), ' %')
         LIMIT 1
     """
 

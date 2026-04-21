@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS `draft_picks` (
 -- 8. players_stats_nl_2025 — 2025 시즌 NL 선수 스탯 (타격 통계)
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `players_stats_nl_2025` (
-    `Player`  VARCHAR(100)  DEFAULT NULL,
+    `Name`    VARCHAR(100)  DEFAULT NULL,
     `AB`      INT           DEFAULT NULL,
     `R`       INT           DEFAULT NULL,
     `H`       INT           DEFAULT NULL,
@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS `players_stats_nl_2025` (
 -- 9. players_stats_al_2025 — 2025 시즌 AL 선수 스탯 (타격 통계)
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `players_stats_al_2025` (
-    `Player`  VARCHAR(100)  DEFAULT NULL,
+    `Name`    VARCHAR(100)  DEFAULT NULL,
     `AB`      INT           DEFAULT NULL,
     `R`       INT           DEFAULT NULL,
     `H`       INT           DEFAULT NULL,
