@@ -86,19 +86,19 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
 # Avoid SELECT * / LIKE joins here: they force broader scans and break against the
 # current stats schema where NL/AL tables do not share identical columns.
 _DRAFT_STATS_QUERY = """
-    SELECT Name,
+    SELECT player_name,
            SUM(HR) AS HR,
            SUM(RBI) AS RBI,
            SUM(SB) AS SB,
            SUM(H) / NULLIF(SUM(AB), 0) AS AVG
     FROM (
-        SELECT TRIM(Name) AS Name, AB, H, HR, RBI, SB
+        SELECT TRIM(Name) AS player_name, AB, H, HR, RBI, SB
         FROM players_stats_nl_2025
         UNION ALL
-        SELECT TRIM(Name) AS Name, AB, H, HR, RBI, SB
+        SELECT TRIM(Name) AS player_name, AB, H, HR, RBI, SB
         FROM players_stats_al_2025
     ) combined
-    GROUP BY Name
+    GROUP BY player_name
 """
 
 _DRAFT_BASE_QUERY = f"""
@@ -106,7 +106,7 @@ _DRAFT_BASE_QUERY = f"""
     LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
     LEFT JOIN (
         {_DRAFT_STATS_QUERY}
-    ) s ON s.Name = p.full_name
+    ) s ON s.player_name = p.full_name
     WHERE p.active = 1
 """
 
