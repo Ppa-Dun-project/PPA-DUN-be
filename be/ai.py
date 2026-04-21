@@ -30,9 +30,8 @@ def _get_model() -> GenerativeModel:
 
 class PlayerInput(BaseModel):
     name: str
-    value: float
-    bid: int
-    valuePerDollar: Optional[float]
+    ppaValue: float
+    recommendedBid: int
     stats: dict
 
 
@@ -45,20 +44,26 @@ class CompareResponse(BaseModel):
     recommendation: str
 
 
+def _value_per_dollar(p: PlayerInput) -> Optional[float]:
+    if p.recommendedBid <= 0:
+        return None
+    return round(p.ppaValue / p.recommendedBid, 3)
+
+
 def _build_prompt(a: PlayerInput, b: PlayerInput) -> str:
     return (
         "Compare these two MLB fantasy baseball players and recommend which is the "
         "better draft pick in 2-3 concise sentences. Focus on value per dollar "
         "and key stats.\n\n"
         f"Player A: {a.name}\n"
-        f"  PPA Value: {a.value}\n"
-        f"  Recommended Bid: ${a.bid}\n"
-        f"  Value Per Dollar: {a.valuePerDollar}\n"
+        f"  PPA Value: {a.ppaValue}\n"
+        f"  Recommended Bid: ${a.recommendedBid}\n"
+        f"  Value Per Dollar: {_value_per_dollar(a)}\n"
         f"  Stats: {a.stats}\n\n"
         f"Player B: {b.name}\n"
-        f"  PPA Value: {b.value}\n"
-        f"  Recommended Bid: ${b.bid}\n"
-        f"  Value Per Dollar: {b.valuePerDollar}\n"
+        f"  PPA Value: {b.ppaValue}\n"
+        f"  Recommended Bid: ${b.recommendedBid}\n"
+        f"  Value Per Dollar: {_value_per_dollar(b)}\n"
         f"  Stats: {b.stats}\n"
     )
 
