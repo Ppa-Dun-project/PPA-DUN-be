@@ -108,7 +108,7 @@ def row_to_player_out(player_personal_info, stats: dict) -> PlayerOut:
         valueScore=0,
         
         # 선수 얼굴 사진
-        headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{r['player_id']}/headshot/67/current",
+        headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{p_info_dict['player_id']}/headshot/67/current",
         
         # 선수 플레이 스탯
         stats=PlayerStats(
