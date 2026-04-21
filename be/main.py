@@ -3,6 +3,7 @@
 # configures CORS middleware so the frontend dev server can reach the backend.
 import os
 
+from ai import router as ai_router
 from auth import router as auth_router
 from draft import router as draft_router
 from home import router as home_router
@@ -33,6 +34,7 @@ app.include_router(players_router)
 app.include_router(home_router)
 app.include_router(myteam_router)
 app.include_router(draft_router)
+app.include_router(ai_router)
 
 
 # 메인 백엔드 서버의 상태 확인.
