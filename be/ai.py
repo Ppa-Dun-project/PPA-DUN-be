@@ -1,12 +1,17 @@
-from typing import List, Optional
+import os
+from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from vertexai import init as vertexai_init
 from vertexai.generative_models import GenerativeModel
 
-from core.config import settings
+load_dotenv()
 
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "")
+GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
+VERTEX_AI_MODEL = os.getenv("VERTEX_AI_MODEL", "gemini-2.5-flash")
 
 router = APIRouter(prefix="/api/compare", tags=["ai"])
 
@@ -16,10 +21,10 @@ _model: Optional[GenerativeModel] = None
 def _get_model() -> GenerativeModel:
     global _model
     if _model is None:
-        if not settings.GCP_PROJECT_ID:
+        if not GCP_PROJECT_ID:
             raise HTTPException(status_code=500, detail="GCP_PROJECT_ID not configured")
-        vertexai_init(project=settings.GCP_PROJECT_ID, location=settings.GCP_LOCATION)
-        _model = GenerativeModel(settings.VERTEX_AI_MODEL)
+        vertexai_init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
+        _model = GenerativeModel(VERTEX_AI_MODEL)
     return _model
 
 

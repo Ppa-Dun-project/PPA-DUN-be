@@ -6,7 +6,8 @@ from typing import List, Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from draft import DEFAULT_DRAFT_CONFIG, find_draft_player, get_user_picks
+from database.draft_store import load_draft_config
+from draft import find_draft_player, get_user_picks
 
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
 
@@ -105,15 +106,19 @@ def get_budget_summary(players: List[MyTeamPlayerOut], total_budget: int) -> tup
 # 프론트엔드의 MyTeamPage.tsx 79-84에서 사용 (컴포넌트 최초 마운트 될때 실행되는 useEffect)
 @router.get("/players", response_model=MyTeamPlayersResponse)
 def get_my_team_players(
-    user_id: str = Query(default="default", alias="roomId"),
+    user_id: str = Query(default="default", alias="userId"),
 ):
     # 내가 뽑은 선수 가져옴 (선수별 cost 이용하려고)
     source_players = pick_my_players(user_id=user_id)
-    
+
+    # 드래프트 설정이 없으면 총 예산 0으로 표시 (사용자가 아직 드래프트 설정을 안 한 상태)
+    config = load_draft_config(user_id)
+    budget = config["budget"] if config else 0
+
     # 예산 요약 계산
     total_budget, spent_budget, remaining_budget = get_budget_summary(
         source_players,
-        DEFAULT_DRAFT_CONFIG.budget,
+        budget,
     )
 
     # 내 선수, 전체 예산, 사용 예산, 잔여 예산
