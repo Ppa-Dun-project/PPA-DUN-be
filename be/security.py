@@ -14,10 +14,11 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXP_MINUTES = int(os.environ.get("JWT_EXP_MINUTES", "10080"))
 
-# FastAPI가 내장으로 제공하는 Authorization 헤더 parser
-# 즉, "Bearer" 접두사를 떼고 토큰 문자열만 뽑아줌.
+# 프론트의 HTTP 요청 헤더 중 Authorization 헤더를 검사하여 토큰 추출.
+# 즉, "Bearer" 접두사 검수 후, 접두사와 토큰 문자열을 분리하여 저장.
 # auto_error = False -> Authorization 헤더가 없거나 Bearer 접두사가 아니면 FastAPI가 자동으로 403 Forbidden을 던짐
 bearer_scheme = HTTPBearer(auto_error=False)
+
 
 # user id를 넣으면 JWT 토큰을 발급해주는 함수
 # 로그인이 성공했을 때 서버가 이 함수로 토큰을 만들어 프론트로 돌려줌
@@ -35,13 +36,12 @@ def create_access_token(user_id: int) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-# 요청 헤더의 JWT를 검증하고 유저 ID를 뽑아냄 (즉, 토큰을 풀어내는 함수)
-# 보호된 엔드포인트마다 이 함수가 매 요청 앞에 끼어들어서 검증함.
+# 요청 헤더의 JWT를 검증하고 유저 ID를 뽑아냄 (즉, 토큰을 풀어내는 함수) / 보호된 엔드포인트마다 이 함수가 매 요청 앞에 끼어들어서 검증함.
+# HTTPAuthorizationCredentials: HTTPBearer가 요청 헤더에서 분리해놓은 인증 정보를 담아두는 데이터 객체
 # Depends(): 이 함수가 콜 되면 자동으로 괄호 안의 변수 및 함수 실행
 def get_current_user_id(
     auth: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> int:
-    # auth는 Authorization 헤더를 읽어서 만든 값이 들어감. HTTPAuthorizationCredentials 타입이거나 None일 수 있음.
     # auth.scheme      -> "Bearer" 문자열
     # auth.credentials -> 실제 토큰 문자열 (xxxxx.yyyyy.zzzzz)
     # "Bearer" + 토큰 = 헤더
