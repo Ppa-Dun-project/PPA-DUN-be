@@ -2,6 +2,7 @@
 # Used by auth router (token issuance) and any router that depends on `get_current_user_id`.
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import jwt
 from dotenv import load_dotenv
@@ -36,27 +37,47 @@ def create_access_token(user_id: int) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-# 요청 헤더의 JWT를 검증하고 유저 ID를 뽑아냄 (즉, 토큰을 풀어내는 함수) / 보호된 엔드포인트마다 이 함수가 매 요청 앞에 끼어들어서 검증함.
-# HTTPAuthorizationCredentials: HTTPBearer가 요청 헤더에서 분리해놓은 인증 정보를 담아두는 데이터 객체
-# Depends(): 이 함수가 콜 되면 자동으로 괄호 안의 변수 및 함수 실행
-def get_current_user_id(
-    auth: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> int:
-    # auth.scheme      -> "Bearer" 문자열
-    # auth.credentials -> 실제 토큰 문자열 (xxxxx.yyyyy.zzzzz)
-    # "Bearer" + 토큰 = 헤더
-
-    if auth is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
-        )
+def decode_user_id(credentials: str) -> int:
     try:
         payload = jwt.decode(
-            auth.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM]
+            credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM]
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
-    return int(payload["sub"])
+
+    try:
+        return int(payload["sub"])  # 유저 식별자 반환
+    
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token elements (sub)")
+
+
+# 요청 헤더의 JWT를 검증하고 유저 ID를 뽑아냄 (즉, 토큰을 풀어내는 함수) / 보호된 엔드포인트마다 이 함수가 매 요청 앞에 끼어들어서 검증함.
+# HTTPAuthorizationCredentials: HTTPBearer가 요청 헤더에서 분리해놓은 인증 정보를 담아두는 데이터 객체
+# Depends(): 이 함수가 콜 되면 자동으로 괄호 안의 변수 및 함수 실행
+def get_user_id( auth: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),) -> int:
+    # auth.scheme      -> "Bearer" 문자열 / auth.credentials -> 실제 토큰 문자열 (xxxxx.yyyyy.zzzzz)
+    # "Bearer" + 토큰 = 헤더
+
+
+    # 토큰 없으면 error raise
+    # 로그인 된 사용자만 이용할수 있는 기능 위함
+    if auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+        )
+    return decode_user_id(auth.credentials)
+
+
+def get_optional_user_id(
+    auth: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> Optional[int]:
+    
+    # 토큰이 없는 거면 none 리턴
+    # guest 사용자도 이용할 수 있는 players page 기능 위함
+    if auth is None:
+        return None
+    return decode_user_id(auth.credentials)

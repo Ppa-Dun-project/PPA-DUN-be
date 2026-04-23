@@ -3,11 +3,12 @@
 # Filtering, sorting, and pagination are handled by the frontend.
 from typing import List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from database.draft_store import load_draft_config
 from draft import find_draft_player, get_user_picks
+from security import get_current_user_id
 
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
 
@@ -106,8 +107,10 @@ def get_budget_summary(players: List[MyTeamPlayerOut], total_budget: int) -> tup
 # 프론트엔드의 MyTeamPage.tsx 79-84에서 사용 (컴포넌트 최초 마운트 될때 실행되는 useEffect)
 @router.get("/players", response_model=MyTeamPlayersResponse)
 def get_my_team_players(
-    user_id: str = Query(default="default", alias="userId"),
+    current_user_id: int = Depends(get_current_user_id),
 ):
+    user_id = str(current_user_id)
+
     # 내가 뽑은 선수 가져옴 (선수별 cost 이용하려고)
     source_players = pick_my_players(user_id=user_id)
 
