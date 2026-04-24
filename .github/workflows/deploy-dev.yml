@@ -52,7 +52,9 @@ jobs:
             --command="sudo gcloud auth configure-docker us-east1-docker.pkg.dev --quiet && \
                        sudo docker pull ${{ env.IMAGE }}:latest && \
                        sudo git config --global --add safe.directory /app/cl && \
-                       cd /app/cl && sudo git pull origin main && \
+                       cd /app/cl && \
+                       sudo git fetch origin infra/helm-chart-setup && \
+                       sudo git reset --hard origin/infra/helm-chart-setup && \
                        cd /app/cl/dev && sudo docker compose up -d be"
 
   notify:
