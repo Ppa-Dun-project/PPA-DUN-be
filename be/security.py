@@ -70,14 +70,3 @@ def get_user_id( auth: HTTPAuthorizationCredentials | None = Depends(bearer_sche
             detail="Missing Authorization header",
         )
     return decode_user_id(auth.credentials)
-
-
-def get_optional_user_id(
-    auth: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> Optional[int]:
-    
-    # 토큰이 없는 거면 none 리턴
-    # guest 사용자도 이용할 수 있는 players page 기능 위함
-    if auth is None:
-        return None
-    return decode_user_id(auth.credentials)

@@ -4,13 +4,12 @@
 # When a user opens the Draft page, /bootstrap loads all necessary data in one call.
 # Player value scores and recommended bids come from the player_ppa_scores table.
 from typing import Dict, List, Literal, Optional, Set, Tuple
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from database.draft_store import engine
 from sqlalchemy import text as sa_text
 
-from security import get_user_id, get_optional_user_id
+from security import get_user_id
 
 
 # Used by Draft page APIs (config/filters/teams/players/picks).
@@ -31,15 +30,10 @@ class PlayerSummary(BaseModel):
     rbi: Optional[int] = None
     sb: Optional[int] = None
 
-# 기존 사용자에게는 ppa-value와 bid 값 보여줘야 하므로 필수
+# 기존 사용자에게는 ppa-value와 bid 값 보여줌
 class LoggedInData(PlayerSummary):
     ppaValue: float
     recommendedBid: int
-
-# guest에게는 보여주지 않아도 되므로 선택
-class GuestData(PlayerSummary):
-    ppaValue: Optional[float] = None
-    recommendedBid: Optional[int] = None
 
 # 드래프트 세션 설정에 관한 값들
 class DraftConfig(BaseModel):
@@ -57,8 +51,18 @@ class DraftTeam(BaseModel):
     isMine: bool
 
 # 비로그인 사용자에게 보여줄 Summary 값의 리스트 형태
-class GuestPlayerSummaryList(BaseModel):
-    items: List[GuestData]
+class PlayerSummaryList(BaseModel):
+    items: List[PlayerSummary]
+
+
+class DraftPlayerValue(BaseModel):
+    playerId: str
+    ppaValue: float
+    recommendedBid: int
+
+
+class DraftPlayerValueList(BaseModel):
+    items: List[DraftPlayerValue]
 
 
 # 드래프트 된 야구선수의 세부 현황 및 조건
@@ -74,11 +78,11 @@ class PlayerDraftStatus(BaseModel):
 class PlayerDraftStatusIndex(PlayerDraftStatus):
     slotIndex: int
 
-class DraftPicksResponse(BaseModel):
-    roomId: str
+class DraftPicksInRoom(BaseModel):
+    userId: str
     items: List[PlayerDraftStatusIndex]
 
-class DraftBootstrapResponse(BaseModel):
+class SavedDraftStatus(BaseModel):
     config: DraftConfig
     teams: List[DraftTeam]
     picks: List[PlayerDraftStatusIndex]
@@ -160,7 +164,7 @@ SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "BENCH",
 ]
 
-def _row_to_player_dict(row) -> dict:
+def player_summary_dict(row) -> dict:
     r = row._mapping
     raw_pos = r["position"] or "DH"  
     draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL") 
@@ -174,8 +178,6 @@ def _row_to_player_dict(row) -> dict:
         "hr": int(r.get("HR") or 0) or None,
         "rbi": int(r.get("RBI") or 0) or None,
         "sb": int(r.get("SB") or 0) or None,
-        "ppaValue": 2.0,       # 실제 비즈니스 로직에 맞게 연산
-        "recommendedBid": 1,   # 실제 비즈니스 로직에 맞게 연산
     }
 
 
@@ -238,8 +240,8 @@ def find_draft_player(player_id: str) -> Optional[LoggedInData]:
     if not row:
         return None
     
-    player_data = _row_to_player_dict(row)
-    return PlayerDraftStatusIndex(**player_data)
+    player_data = player_summary_dict(row)
+    return LoggedInData(**player_data)
 
 
 def find_available_slot_index(
@@ -300,7 +302,7 @@ def normalized_config(
 
 ############################ 드래프트 현황 #############################
 # 드래프트 페이지 초기 마운트시 프론트가 가장 먼저 호출하는 통합 엔드포인트
-@router.get("/bootstrap", response_model=DraftBootstrapResponse)
+@router.get("/bootstrap", response_model=SavedDraftStatus)
 def get_draft_bootstrap(
     league_type: str = Query(alias="leagueType"),
     budget: int = Query(),
@@ -345,7 +347,7 @@ def get_draft_bootstrap(
     picks = get_user_picks(user_id)
     
     
-    return DraftBootstrapResponse(
+    return SavedDraftStatus(
         config=config,
         teams=teams,
         picks=picks,
@@ -354,40 +356,42 @@ def get_draft_bootstrap(
 
 ############################ 선수 데이터 #############################
 # 현역 선수 전체를 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
-# 비로그인 사용자도 ppa-value와 bid 값을 제외하고 사용이 가능해야 하므로 GuestPlayerSummaryList 사용
-@router.get("/players", response_model=GuestPlayerSummaryList)
-def get_draft_players(
-    current_user_id: Optional[int] = Depends(get_optional_user_id),
-):
+# 비로그인 사용자도 ppa-value와 bid 값을 제외하고 사용이 가능해야 하므로 이를 고려한 GuestPlayerSummaryList 사용
+@router.get("/players", response_model=PlayerSummaryList)
+def get_draft_players():
     data_sql = sa_text(f"""
-        SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-               s.AVG, s.HR, s.RBI, s.SB
-        {_DRAFT_BASE_QUERY}
-    """)
+            SELECT p.player_id, p.full_name, p.position, t.abbreviation,
+                s.AVG, s.HR, s.RBI, s.SB
+            {_DRAFT_BASE_QUERY}
+        """)
     with engine.connect() as conn:
         rows = conn.execute(data_sql).fetchall()
-
-    # bid와 ppa-value 공개를 위한 사용자 검색
-    # user id 존재 여부 boolean
-    reveal_private = current_user_id is not None
-    
+        
     items = []
     
     for row in rows:
-        player_data = _row_to_player_dict(row)
-        if not reveal_private:
-            # private 정보를 지우고 리스트 모델 생성
-            player_data["ppaValue"] = None
-            player_data["recommendedBid"] = None
-            
-        items.append(GuestData(**player_data))
-    return GuestPlayerSummaryList(items=items)
+        player_data = player_summary_dict(row)
+        items.append(PlayerSummary(**player_data))
+    
+    # 비로그인 사용자에게 보여줄 리스트
+    return PlayerSummaryList(items=items)
+
+
 
 
 ########################## 드래프트에서 선수 픽 등록/수정 (Add/Taken) ##########################
 # 등록되어있는 선수 remove 기능 만들건지? 현재로서는 add/taken에서만 호출됨
-# 드래프트 세션은 로그인된 사용자만 사용 가능하므로 
-@router.post("/picks", response_model=DraftPicksResponse)
+# 드래프트 세션은 로그인된 사용자만 사용 가능하므로 Depends
+@router.get("/players/values", response_model=DraftPlayerValueList)
+def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
+    
+    items = []
+    
+    
+    return DraftPlayerValueList(items=items)
+
+
+@router.post("/picks", response_model=DraftPicksInRoom)
 def upsert_draft_pick_endpoint(
     payload: PlayerDraftStatus,
     roster_players: int = Query(alias="rosterPlayers", gt=0),
@@ -456,11 +460,11 @@ def upsert_draft_pick_endpoint(
     )
 
     all_picks = get_user_picks(user_id)
-    return DraftPicksResponse(roomId=user_id, items=all_picks)
+    return DraftPicksInRoom(userId=user_id, items=all_picks)
 
 
 ############################### 야구 선수 드래프트에서 삭제 (픽 취소) ###############################
-@router.delete("/picks/{player_id}", response_model=DraftPicksResponse)
+@router.delete("/picks/{player_id}", response_model=DraftPicksInRoom)
 def delete_draft_pick_endpoint(
     player_id: str,
     current_user_id: int = Depends(get_user_id),
@@ -472,7 +476,7 @@ def delete_draft_pick_endpoint(
         raise HTTPException(status_code=404, detail="Pick not found")
 
     all_picks = get_user_picks(user_id)
-    return DraftPicksResponse(roomId=user_id, items=all_picks)
+    return DraftPicksInRoom(userId=user_id, items=all_picks)
 
 
 
