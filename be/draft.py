@@ -178,13 +178,15 @@ def player_summary_dict(row) -> dict:
         "hr": int(r.get("HR") or 0) or None,
         "rbi": int(r.get("RBI") or 0) or None,
         "sb": int(r.get("SB") or 0) or None,
+        "ppaValue": float(2.0),
+        "recommendedBid": int(2.0)
     }
 
 def player_value_dict(row) -> dict:
     r = row._mapping
     return {
         "playerId": str(r["player_id"]),
-        "ppaValue": float(1.0),
+        "ppaValue": float(2.0),
         "recommendedBid": int(2.0)
     }
 
