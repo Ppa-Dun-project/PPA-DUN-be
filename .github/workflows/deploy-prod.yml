@@ -1,0 +1,67 @@
+name: Deploy Backend to Prod
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  GCP_REGION: us-east1
+  IMAGE: us-east1-docker.pkg.dev/v1-mvp/be-prod/be
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ env.IMAGE }}:${{ github.sha }} -t ${{ env.IMAGE }}:latest .
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+          docker push ${{ env.IMAGE }}:latest
+
+  update-helm:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cloud repo
+        uses: actions/checkout@v4
+        with:
+          repository: Ppa-Dun-project/PPA-DUN-cloud
+          ref: infra/helm-chart-setup
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Update image tag
+        run: |
+          sed -i '/ppaDunBe:/,/port:/ s|tag: .*|tag: "${{ github.sha }}"|' helm/ppa-dun/values.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add helm/ppa-dun/values.yaml
+          git commit -m "deploy: update ppa-dun-be image to ${{ github.sha }}"
+          git push
+
+  notify:
+    needs: update-helm
+    if: always()
+    uses: ./.github/workflows/discord-deploy-notify.yml
+    with:
+      status: ${{ needs.update-helm.result }}
+      service: Backend (Prod)
+    secrets:
+      DISCORD_DEPLOY_WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
