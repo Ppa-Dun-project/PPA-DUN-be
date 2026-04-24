@@ -15,3 +15,4 @@ google-auth
 google-auth-httplib2
 
 pyjwt
+google-cloud-aiplatform
