@@ -12,6 +12,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
+from ppa_api.ppa_client import PpaApiClient
+
 load_dotenv()
 DATABASE_URL = (
     f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
@@ -61,6 +63,13 @@ class PlayerOut(BaseModel):
     headshotUrl: Optional[str] = None
     stats: PlayerStats
 
+
+class PlayerValueOut(BaseModel):
+    playerId: int
+    name: str
+    valueScore: float
+
+
 # 선수별 상세 포지션 -> 하나로 통일화 (실제 서비스에서도 그렇게 대부분 함)
 POSITION_TO_FILTER = {
     "LF": "OF", "CF": "OF", "RF": "OF",
@@ -76,7 +85,7 @@ def parse_height_to_inches(height_str: str) -> int:
     return 0
 
 # Converts a player row + merged stats dict into a PlayerOut model.
-def row_to_player_out(player_personal_info, stats: dict) -> PlayerOut:
+def player_whole_info(player_personal_info, stats: dict) -> PlayerOut:
     
     # row 객체 -> Dict 형식 (선수 신체 정보 등)
     p_info_dict = player_personal_info._mapping
@@ -105,7 +114,6 @@ def row_to_player_out(player_personal_info, stats: dict) -> PlayerOut:
         throws=p_info_dict["pitch_hand"] or "R",
         team=p_info_dict["abbreviation"] or "",
         positions=[display_pos],
-        valueScore=0,
         
         # 선수 얼굴 사진
         headshotUrl=f"https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/{p_info_dict['player_id']}/headshot/67/current",
@@ -169,6 +177,14 @@ def merge_stats(nl_row, al_row) -> dict:
     return merged
 
 
+def build_ppa_api_client() -> PpaApiClient:
+    return PpaApiClient(
+        base_url=os.getenv("EXTERNAL_API_BASE_URL", ""),
+        api_key=os.getenv("EXTERNAL_API_KEY", ""),
+        timeout_seconds=float(os.getenv("EXTERNAL_API_TIMEOUT_SECONDS", "5")),
+    )
+
+
 # Used by PlayerDetail page.
 @router.get("/{player_id}", response_model=PlayerOut)
 def get_player_detail(player_id: int):
@@ -208,11 +224,26 @@ def get_player_detail(player_id: int):
             {"full_name": full_name},
         ).fetchone()
 
-    return row_to_player_out(player_personal_info, merge_stats(nl_row, al_row))
+    return player_whole_info(player_personal_info, merge_stats(nl_row, al_row))
 
 
-######### 이거는 야구 선수의 value를 계산하는건데, 아마 DB 또는 어딘가에 캐싱해놓고 불러오는 로직으로 설정할듯 ########3
-
-@router.get("/{player_id}/value", response_model=float)
+######### 이거는 야구 선수의 value를 계산하는건데, 아마 DB 또는 어딘가에 캐싱해놓고 불러오는 로직으로 설정할듯 ########
+@router.get("/{player_id}/value", response_model=PlayerValueOut)
 def get_player_value(player_id: int):
-    return
+    player_name_sql = """
+        SELECT full_name
+        FROM mlb_players_list
+        WHERE active = 1 AND player_id = :player_id
+    """
+
+    with engine.connect() as conn:
+        player_row = conn.execute(text(player_name_sql), {"player_id": player_id}).fetchone()
+
+    if not player_row:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    return PlayerValueOut(
+        playerId=player_id,
+        name=player_row._mapping["full_name"],
+        valueScore=2.0,
+    )

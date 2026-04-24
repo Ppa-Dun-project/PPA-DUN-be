@@ -4,11 +4,12 @@
 # When a user opens the Draft page, /bootstrap loads all necessary data in one call.
 # Player value scores and recommended bids come from the player_ppa_scores table.
 from typing import Dict, List, Literal, Optional, Set, Tuple
-
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from database.draft_store import engine
 from sqlalchemy import text as sa_text
+
+from security import get_user_id
 
 
 # Used by Draft page APIs (config/filters/teams/players/picks).
@@ -17,9 +18,25 @@ router = APIRouter(prefix="/api/draft", tags=["draft"])
 DraftPosition = Literal["C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP", "BENCH"]
 DraftPickType = Literal["mine", "taken"]
 
+# 선수별 드래프트 관련 정보 + 간단 개인 스탯
+# 공통 요소 집합
+class PlayerSummary(BaseModel):
+    id: str
+    name: str
+    positions: List[DraftPosition]
+    team: str
+    avg: Optional[float] = None
+    hr: Optional[int] = None
+    rbi: Optional[int] = None
+    sb: Optional[int] = None
 
-# Used by DraftSetup/Draft page. Represents normalized draft config.
-class DraftConfigOut(BaseModel):
+# 기존 사용자에게는 ppa-value와 bid 값 보여줌
+class LoggedInData(PlayerSummary):
+    ppaValue: float
+    recommendedBid: int
+
+# 드래프트 세션 설정에 관한 값들
+class DraftConfig(BaseModel):
     leagueType: str
     budget: int
     rosterPlayers: int
@@ -27,51 +44,48 @@ class DraftConfigOut(BaseModel):
     opponentsCount: int
     oppTeamNames: List[str]
 
-class DraftTeamOut(BaseModel):
+# 사용자와 상대의 각 생성된 정보
+class DraftTeam(BaseModel):
     id: str
     name: str
     isMine: bool
 
-# 선수별 드래프트 관련 정보 + 간단 개인 스탯
-class DraftPlayerOut(BaseModel):
-    id: str
-    name: str
-    positions: List[DraftPosition]
-    recommendedBid: int
-    team: str
-    avg: Optional[float] = None
-    hr: Optional[int] = None
-    rbi: Optional[int] = None
-    sb: Optional[int] = None
-    ppaValue: float
+# 비로그인 사용자에게 보여줄 Summary 값의 리스트 형태
+class PlayerSummaryList(BaseModel):
+    items: List[PlayerSummary]
 
-class DraftPlayerListResponse(BaseModel):
-    items: List[DraftPlayerOut]
+
+class DraftPlayerValue(BaseModel):
+    playerId: str
+    ppaValue: float
+    recommendedBid: int
+
+
+class DraftPlayerValueList(BaseModel):
+    items: List[DraftPlayerValue]
+
+
+# 드래프트 된 야구선수의 세부 현황 및 조건
+class PlayerDraftStatus(BaseModel):
+    playerId: str
+    draftedByTeamId: str
+    slotPos: DraftPosition
+    bid: Optional[int] = None
+    type: DraftPickType
+
 
 # 선수의 픽 상태 (어떤 팀이 픽했는지, 어떤 포지션에 배치됐는지, 가격은 얼마인지 등)
-class DraftPickOut(BaseModel):
-    playerId: str
-    draftedByTeamId: str
+class PlayerDraftStatusIndex(PlayerDraftStatus):
     slotIndex: int
-    slotPos: DraftPosition
-    bid: Optional[int] = None
-    type: DraftPickType
 
-class DraftPickUpsertIn(BaseModel):
-    playerId: str
-    draftedByTeamId: str
-    slotPos: DraftPosition
-    bid: Optional[int] = None
-    type: DraftPickType
+class DraftPicksInRoom(BaseModel):
+    userId: str
+    items: List[PlayerDraftStatusIndex]
 
-class DraftPicksResponse(BaseModel):
-    roomId: str
-    items: List[DraftPickOut]
-
-class DraftBootstrapResponse(BaseModel):
-    config: DraftConfigOut
-    teams: List[DraftTeamOut]
-    picks: List[DraftPickOut]
+class SavedDraftStatus(BaseModel):
+    config: DraftConfig
+    teams: List[DraftTeam]
+    picks: List[PlayerDraftStatusIndex]
 
 
 # DB position -> draft position mapping
@@ -110,29 +124,6 @@ _DRAFT_BASE_QUERY = f"""
     WHERE p.active = 1
 """
 
-# DB 행 하나를 DraftPlayerOut 모델로 변환하는 함수. 
-def _row_to_draft_player(row) -> DraftPlayerOut:
-    r = row._mapping
-    
-    # 포지션 정보가 없는 선수는 DH(지명타자)로 간주
-    raw_pos = r["position"] or "DH"  
-    
-    # DB 포지션을 드래프트 포지션으로 매핑. 위에서 DH 처리 된건 자동 UTIL로 처리
-    draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL") 
-    
-    
-    return DraftPlayerOut(
-        id=str(r["player_id"]),
-        name=r["full_name"],
-        positions=[draft_pos],
-        recommendedBid=1,
-        team=r["abbreviation"] or "",
-        avg=round(float(r.get("AVG") or 0), 3) or None,
-        hr=int(r.get("HR") or 0) or None,
-        rbi=int(r.get("RBI") or 0) or None,
-        sb=int(r.get("SB") or 0) or None,
-        ppaValue=2.0,
-    )
 
 # DB-backed draft storage
 from database.draft_store import (
@@ -173,6 +164,23 @@ SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "BENCH",
 ]
 
+def player_summary_dict(row) -> dict:
+    r = row._mapping
+    raw_pos = r["position"] or "DH"  
+    draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL") 
+    
+    return {
+        "id": str(r["player_id"]),
+        "name": r["full_name"],
+        "positions": [draft_pos],
+        "team": r["abbreviation"] or "",
+        "avg": round(float(r.get("AVG") or 0), 3) or None,
+        "hr": int(r.get("HR") or 0) or None,
+        "rbi": int(r.get("RBI") or 0) or None,
+        "sb": int(r.get("SB") or 0) or None,
+    }
+
+
 # Clamps a number to a given range. Ensures user input stays within valid bounds.
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, int(value)))
@@ -180,17 +188,17 @@ def clamp_int(value: int, min_value: int, max_value: int) -> int:
 
 # Builds the list of teams for a draft room.
 # opp_team_names: user-provided opponent names (auto-generated if empty)
-def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_count: int) -> List[DraftTeamOut]:
+def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_count: int) -> List[DraftTeam]:
     # 전체 team 정보 모을 리스트 선언
     # 내 팀 정보 먼저 추가 (항상 team-0, isMine=True)
-    teams: List[DraftTeamOut] = [
-        DraftTeamOut(id="team-0", name=my_team_name or "My Team", isMine=True)
+    teams: List[DraftTeam] = [
+        DraftTeam(id="team-0", name=my_team_name or "My Team", isMine=True)
     ]
     
     # 상대 팀 정보 추가 (team-1, team-2, ... / isMine=False)
     for i in range(max(0, opponents_count)):
         name = opp_team_names[i] if i < len(opp_team_names) and opp_team_names[i] else f"Opponent {i + 1}"
-        teams.append(DraftTeamOut(id=f"team-{i + 1}", name=name, isMine=False))
+        teams.append(DraftTeam(id=f"team-{i + 1}", name=name, isMine=False))
     
     # 전체 팀 정보 반환 (id, name, isMine)
     return teams
@@ -198,16 +206,15 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
 
 
 # DB에서 드래프트 픽 목록을 불러오는 함수. user_id로 특정 사용자가 생성한 드래프트 세션을 통째로 가져옴.
-def get_user_picks(user_id: str) -> List[DraftPickOut]:
+def get_user_picks(user_id: str) -> List[PlayerDraftStatusIndex]:
     
     # 야구 선수 별 드래프트에 관련된 개별 정보를 다 가져옴 (스탯은 제외)
     rows = load_draft_picks(user_id)
     
     # load_draft_picks 함수에서 이미 dict 형식으로 반환해옴
     # dict 형식에는 key & value
-    # 결론적으로 이 함수의 반환 값은 내가 생성한 타입 (DraftPickOut)으로 구성된 리스트
     return [
-        DraftPickOut(
+        PlayerDraftStatusIndex(
             playerId=r["playerId"],               # 선수 ID
             draftedByTeamId=r["draftedByTeamId"], # 해당 선수를 뽑은 팀 ID
             slotIndex=r["slotIndex"],             # 슬롯 인덱스
@@ -219,7 +226,7 @@ def get_user_picks(user_id: str) -> List[DraftPickOut]:
     ]
 
 # Looks up a single player by player_id from the database.
-def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:    
+def find_draft_player(player_id: str) -> Optional[LoggedInData]:    
     # :player_id는 플레이스홀더로, 실제 값은 그 아래 execute()에서 전달
     # 한 선수의 스탯 부터 모든 정보를 한번에 다 모아서 갖고옴
     sql = sa_text(f"""
@@ -233,8 +240,8 @@ def find_draft_player(player_id: str) -> Optional[DraftPlayerOut]:
     if not row:
         return None
     
-    
-    return _row_to_draft_player(row)
+    player_data = player_summary_dict(row)
+    return LoggedInData(**player_data)
 
 
 def find_available_slot_index(
@@ -259,7 +266,7 @@ def normalized_config(
     my_team_name: str,
     opp_team_names: List[str],
     opponents_count: int,
-) -> Tuple[DraftConfigOut, List[DraftTeamOut]]:
+) -> Tuple[DraftConfig, List[DraftTeam]]:
 
     # 사용자가 최대, 최소 범위를 벗어날 경우 normalization
     normalized_budget = clamp_int(budget, 50, 600)
@@ -277,7 +284,7 @@ def normalized_config(
     opps = [t.name for t in teams if not t.isMine]
 
     # 전체 드래프트 설정 정보 (config) 객체 최종 생성
-    config = DraftConfigOut(
+    config = DraftConfig(
         leagueType=league_type,
         budget=normalized_budget,
         rosterPlayers=normalized_roster,
@@ -295,7 +302,7 @@ def normalized_config(
 
 ############################ 드래프트 현황 #############################
 # 드래프트 페이지 초기 마운트시 프론트가 가장 먼저 호출하는 통합 엔드포인트
-@router.get("/bootstrap", response_model=DraftBootstrapResponse)
+@router.get("/bootstrap", response_model=SavedDraftStatus)
 def get_draft_bootstrap(
     league_type: str = Query(alias="leagueType"),
     budget: int = Query(),
@@ -303,9 +310,10 @@ def get_draft_bootstrap(
     my_team_name: str = Query(alias="myTeamName"),
     opp_team_names_raw: str = Query(default="", alias="oppTeamNames"),
     opponents_count: int = Query(alias="opponentsCount"),
-    user_id: str = Query(default="default", alias="userId"),
+    current_user_id: int = Depends(get_user_id),
 ):
-    
+    user_id = str(current_user_id)
+
     # 프론트에서 보낸 상대팀 이름 뽑아내기
     opp_team_names: List[str] = []
     for name in opp_team_names_raw.split(","):
@@ -339,7 +347,7 @@ def get_draft_bootstrap(
     picks = get_user_picks(user_id)
     
     
-    return DraftBootstrapResponse(
+    return SavedDraftStatus(
         config=config,
         teams=teams,
         picks=picks,
@@ -348,29 +356,52 @@ def get_draft_bootstrap(
 
 ############################ 선수 데이터 #############################
 # 현역 선수 전체를 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
-@router.get("/players", response_model=DraftPlayerListResponse)
+# 비로그인 사용자도 ppa-value와 bid 값을 제외하고 사용이 가능해야 하므로 이를 고려한 GuestPlayerSummaryList 사용
+@router.get("/players", response_model=PlayerSummaryList)
 def get_draft_players():
     data_sql = sa_text(f"""
-        SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-               s.AVG, s.HR, s.RBI, s.SB
-        {_DRAFT_BASE_QUERY}
-    """)
+            SELECT p.player_id, p.full_name, p.position, t.abbreviation,
+                s.AVG, s.HR, s.RBI, s.SB
+            {_DRAFT_BASE_QUERY}
+        """)
     with engine.connect() as conn:
         rows = conn.execute(data_sql).fetchall()
+        
+    items = []
+    
+    for row in rows:
+        player_data = player_summary_dict(row)
+        items.append(PlayerSummary(**player_data))
+    
+    # 비로그인 사용자에게 보여줄 리스트
+    return PlayerSummaryList(items=items)
 
-    items = [_row_to_draft_player(r) for r in rows]
-    return DraftPlayerListResponse(items=items)
+
 
 
 ########################## 드래프트에서 선수 픽 등록/수정 (Add/Taken) ##########################
 # 등록되어있는 선수 remove 기능 만들건지? 현재로서는 add/taken에서만 호출됨
-@router.post("/picks", response_model=DraftPicksResponse)
+# 드래프트 세션은 로그인된 사용자만 사용 가능하므로 Depends
+@router.get("/players/values", response_model=DraftPlayerValueList)
+def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
+    
+    items = []
+    
+    
+    return DraftPlayerValueList(items=items)
+
+
+@router.post("/picks", response_model=DraftPicksInRoom)
 def upsert_draft_pick_endpoint(
-    payload: DraftPickUpsertIn,
-    user_id: str = Query(default="default", alias="userId"),
+    payload: PlayerDraftStatus,
     roster_players: int = Query(alias="rosterPlayers", gt=0),
+    current_user_id: int = Depends(get_user_id),
 ):
+    user_id = str(current_user_id)
+
     # 선수의 요약된 스탯 정보를 불러옴
+    ### 이거 좀 최적화 할수 있을거 같은데?????????????????????????????????????????????????????????????????????
+    # 플레이어가 있는지 판단하는거라면 굳이 이 모든 정보를 다 불러올 필요가 없잖음
     player = find_draft_player(payload.playerId)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -381,7 +412,8 @@ def upsert_draft_pick_endpoint(
     
     # Upsert 지원: 같은 선수를 다시 픽하는 경우, 기존 픽을 제외한 목록으로 슬롯 계산.
     # next_picks: player_id에 해당하는 선수 제외 나머지 선수들 리스트
-    next_picks: List[DraftPickOut] = []
+    next_picks: List[PlayerDraftStatusIndex] = []
+    
     for pick in picks:
         # DB에서 불러온 id vs 프론트에서 보낸 id
         # id가 다른 경우에만 넣어라 -> 동일한 선수는 들어가지 않도록 -> 한 선수의 포지션을 바꾸는 경우
@@ -402,7 +434,7 @@ def upsert_draft_pick_endpoint(
             occupied.add(pick.slotIndex)
     
     
-    ########################### 드래프트 한 선수 위치 변경 ############################
+    ########################### 드래프트 한 선수를 취소 후 다른 선수를 등록하는 경우 ############################
     # 현재는 그냥 가장 먼저 나오는 빈 슬롯에 배치하는 걸로 되어 있음. (포지션 규칙 없이)
     resolved_slot_index = find_available_slot_index(
         payload.slotPos,
@@ -428,21 +460,23 @@ def upsert_draft_pick_endpoint(
     )
 
     all_picks = get_user_picks(user_id)
-    return DraftPicksResponse(roomId=user_id, items=all_picks)
+    return DraftPicksInRoom(userId=user_id, items=all_picks)
 
 
 ############################### 야구 선수 드래프트에서 삭제 (픽 취소) ###############################
-@router.delete("/picks/{player_id}", response_model=DraftPicksResponse)
+@router.delete("/picks/{player_id}", response_model=DraftPicksInRoom)
 def delete_draft_pick_endpoint(
     player_id: str,
-    user_id: str = Query(default="default", alias="userId"),
+    current_user_id: int = Depends(get_user_id),
 ):
+    user_id = str(current_user_id)
+
     deleted = delete_draft_pick(user_id, player_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Pick not found")
 
     all_picks = get_user_picks(user_id)
-    return DraftPicksResponse(roomId=user_id, items=all_picks)
+    return DraftPicksInRoom(userId=user_id, items=all_picks)
 
 
 
@@ -450,7 +484,9 @@ def delete_draft_pick_endpoint(
 # 추후 드래프트 리셋 기능을 만들게 되면 사용.
 @router.delete("/reset", response_model=dict)
 def reset_draft_endpoint(
-    user_id: str = Query(default="default", alias="userId"),
+    current_user_id: int = Depends(get_user_id),
 ):
+    user_id = str(current_user_id)
+
     reset_draft(user_id)
     return {"status": "ok", "userId": user_id}
