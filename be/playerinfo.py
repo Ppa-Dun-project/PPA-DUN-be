@@ -12,7 +12,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
-from ppa_api.ppa_client import PpaApiClient
+from database.players_lookup import get_player_by_id
+from ppa_api.ppa_client import (
+    ApiConfigError,
+    ApiHttpError,
+    ApiInvalidResponseError,
+    ApiNetworkError,
+    build_ppa_api_client,
+)
 
 load_dotenv()
 DATABASE_URL = (
@@ -177,14 +184,6 @@ def merge_stats(nl_row, al_row) -> dict:
     return merged
 
 
-def build_ppa_api_client() -> PpaApiClient:
-    return PpaApiClient(
-        base_url=os.getenv("EXTERNAL_API_BASE_URL", ""),
-        api_key=os.getenv("EXTERNAL_API_KEY", ""),
-        timeout_seconds=float(os.getenv("EXTERNAL_API_TIMEOUT_SECONDS", "5")),
-    )
-
-
 # Used by PlayerDetail page.
 @router.get("/{player_id}", response_model=PlayerOut)
 def get_player_detail(player_id: int):
@@ -227,23 +226,37 @@ def get_player_detail(player_id: int):
     return player_whole_info(player_personal_info, merge_stats(nl_row, al_row))
 
 
-######### 이거는 야구 선수의 value를 계산하는건데, 아마 DB 또는 어딘가에 캐싱해놓고 불러오는 로직으로 설정할듯 ########
+# 외부 API의 GET /players/{name}을 호출해 valuation score를 실시간 조회.
+# 응답의 id가 요청 id와 일치하는지 검증해 동명이인 케이스를 안전하게 거름.
 @router.get("/{player_id}/value", response_model=PlayerValueOut)
-def get_player_value(player_id: int):
-    player_name_sql = """
-        SELECT full_name
-        FROM mlb_players_list
-        WHERE active = 1 AND player_id = :player_id
-    """
+async def get_player_value(player_id: int):
+    found = get_player_by_id(str(player_id))
+    if found is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    name, _, _ = found
 
-    with engine.connect() as conn:
-        player_row = conn.execute(text(player_name_sql), {"player_id": player_id}).fetchone()
+    client = build_ppa_api_client()
+    try:
+        api_response = await client.player_by_name(name)
+    except ApiHttpError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="Player not found in external API")
+        raise HTTPException(status_code=502, detail=f"External API error: {exc.detail}")
+    except ApiNetworkError as exc:
+        status = 504 if exc.timed_out else 503
+        raise HTTPException(status_code=status, detail=exc.detail)
+    except ApiInvalidResponseError:
+        raise HTTPException(status_code=502, detail="Invalid response from external API")
+    except ApiConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    if not player_row:
+    player_data = api_response.get("player") or {}
+
+    if int(player_data.get("id") or 0) != player_id:
         raise HTTPException(status_code=404, detail="Player not found")
 
     return PlayerValueOut(
         playerId=player_id,
-        name=player_row._mapping["full_name"],
-        valueScore=2.0,
+        name=player_data.get("name") or name,
+        valueScore=float(player_data.get("player_value") or 0.0),
     )

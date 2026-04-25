@@ -5,9 +5,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import text as sa_text
 
-from database.draft_store import load_draft_config
-from draft import find_draft_player, get_user_picks
+from database.draft_store import engine, load_draft_config
+from draft import _DRAFT_BASE_QUERY, get_user_picks, player_summary_dict
 from security import get_user_id
 
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
@@ -33,6 +34,26 @@ class MyTeamPlayersResponse(BaseModel):
     remainingBudget: int
 
 
+def find_draft_player(player_id: str) -> Optional[dict]:
+    try:
+        normalized_player_id = int(player_id)
+    except (TypeError, ValueError):
+        return None
+
+    sql = sa_text(f"""
+        SELECT p.player_id, p.full_name, p.position, t.abbreviation,
+               s.AVG, s.HR, s.RBI, s.SB
+        {_DRAFT_BASE_QUERY} AND p.player_id = :player_id
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"player_id": normalized_player_id}).fetchone()
+
+    if not row:
+        return None
+
+    return player_summary_dict(row)
+
+
 # ID를 통해 야구 선수의 드래프트 정보 + 스탯 정보 불러옴
 def player_drafts_stats_collection(
     player_id: str,
@@ -48,22 +69,22 @@ def player_drafts_stats_collection(
 
     # 벤치 선수는 원래 포지션을 괄호 안에 표시 (예: "BENCH(1B)")
     if slot_pos == "BENCH":
-        original_pos = draft_player.positions[0] if draft_player.positions else "UTIL"
+        original_pos = draft_player["positions"][0] if draft_player["positions"] else "UTIL"
         position = f"BENCH({original_pos})"
     else:
         position = slot_pos
 
     return MyTeamPlayerOut(
-        id=draft_player.id,
-        name=draft_player.name,
+        id=draft_player["id"],
+        name=draft_player["name"],
         pos=position,
         cost=int(bid or 0),
-        team=draft_player.team,
-        avg=float(draft_player.avg or 0.0),
-        hr=int(draft_player.hr or 0),
-        rbi=int(draft_player.rbi or 0),
-        sb=int(draft_player.sb or 0),
-        ppaValue=float(draft_player.ppaValue),
+        team=draft_player["team"],
+        avg=float(draft_player["avg"] or 0.0),
+        hr=int(draft_player["hr"] or 0),
+        rbi=int(draft_player["rbi"] or 0),
+        sb=int(draft_player["sb"] or 0),
+        ppaValue=float(2.0),
     )
 
 # 사용자(나) 가 드래프트 한 선수 목록과 스탯 데이터 뽑아내기
