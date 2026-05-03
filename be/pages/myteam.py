@@ -9,7 +9,7 @@ from sqlalchemy import bindparam, text as sa_text
 
 from database.draft_store import load_draft_config
 from orm.session import engine
-from backend.be.pages.draft import get_user_picks
+from pages.draft import get_user_picks
 from security import get_user_id
 
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
