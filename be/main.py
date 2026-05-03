@@ -9,10 +9,10 @@ from apscheduler.triggers.cron import CronTrigger
 
 from ai import router as ai_router
 from auth import router as auth_router
-from backend.be.pages.draft import router as draft_router
-from backend.be.pages.home import router as home_router
-from backend.be.pages.myteam import router as myteam_router
-from backend.be.pages.playerinfo import router as players_router
+from pages.draft import router as draft_router
+from pages.home import router as home_router
+from pages.myteam import router as myteam_router
+from pages.playerinfo import router as players_router
 
 from database.player_cache_store import ensure_player_cache_table, refresh_player_cache
 from orm.session import engine, Base
