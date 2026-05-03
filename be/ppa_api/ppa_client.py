@@ -71,20 +71,27 @@ class PpaApiClient:
         self._api_key = api_key
         # 요청 타임아웃 시간
         self._timeout_seconds = timeout_seconds
+        # 공유 httpx 클라이언트. async with 컨텍스트로 진입 시 한 번 생성되어 모든 요청에서
+        # connection pool을 공유. 컨텍스트 밖 호출은 매 요청마다 ephemeral 클라이언트 사용.
+        self._shared_client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self) -> "PpaApiClient":
+        self._shared_client = httpx.AsyncClient(timeout=self._timeout_seconds)
+        return self
+
+    async def __aexit__(self, *_exc_info) -> None:
+        if self._shared_client is not None:
+            await self._shared_client.aclose()
+            self._shared_client = None
 
     # 서버 살아있는지 확인
     async def health(self) -> dict[str, Any]:
         return await self.request_json("GET", "/health", body=None, requires_auth=False)
 
-    # 야구 선수 가치 계산
-    # body에 선수 정보, 리그 정보, 시즌 정보 등을 담아서 POST 요청을 보낸다.
-    async def player_value(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.request_json("POST", "/player/value", body=payload, requires_auth=True)
-
-    # 야구 선수 입찰가 추천
-    # body에 위와 동일한 정보를 넣어서 보낸다
+    # 야구 선수 입찰가 추천. payload 형식은 호출자 책임.
+    # 신규 스펙: {player_id, league_context, draft_context: {..., my_positions_filled}}
     async def player_bid(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.request_json("POST", "/player/bid", body=payload, requires_auth=True)
+        return await self.request_json("POST", "/player/bid/name", body=payload, requires_auth=True)
 
     # 리그 전체 선수 목록 + valuation score 조회
     # league는 "AL" 또는 "NL", columns는 반환받을 필드 이름 리스트 (None이면 API 기본값 사용)
@@ -107,19 +114,6 @@ class PpaApiClient:
             requires_auth=True,
             query_params=query_params,
         )
-
-    # 단일 선수의 전체 데이터 조회 (이름 기반, AL → NL 순으로 탐색)
-    async def player_by_name(self, player_name: str) -> dict[str, Any]:
-        # 이름에 공백/특수문자가 있을 수 있으니 path 인코딩은 httpx가 처리하도록 quote 적용
-        from urllib.parse import quote
-        encoded_name = quote(player_name, safe="")
-        return await self.request_json(
-            "GET",
-            f"/players/{encoded_name}",
-            body=None,
-            requires_auth=True,
-        )
-
 
     ############## HTTP 요청을 보내고 응답 받는 형식 생성 ###############
     # API 서버와 주고 받을 형식 구상, 요청 전송 및 응답 처리
@@ -148,17 +142,25 @@ class PpaApiClient:
         url = f"{self._base_url}{path}"
 
         try:
-            # AsyncClient는 매 요청마다 생성/종료하면 connection pooling 효과를 잃지만,
-            # 호출 빈도와 동시성 패턴이 정해지면 추후 호출자에서 client를 주입받는 형태로 바꾸기 쉽도록
-            # 일단 메서드별 컨텍스트로 둠.
-            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                response = await client.request(
+            # 컨텍스트 매니저로 열린 공유 클라이언트가 있으면 재사용 (대량 동시 호출 시 connection pool 활용),
+            # 없으면 ephemeral 클라이언트를 매 호출마다 생성 (단발성 호출용).
+            if self._shared_client is not None:
+                response = await self._shared_client.request(
                     method=method,
                     url=url,
                     params=query_params,
-                    json=body,  # body가 None이면 httpx가 본문을 비움
+                    json=body,
                     headers=headers,
                 )
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                    response = await client.request(
+                        method=method,
+                        url=url,
+                        params=query_params,
+                        json=body,
+                        headers=headers,
+                    )
         # 타임아웃 (연결/읽기 등 모든 타임아웃 포괄)
         except httpx.TimeoutException as exc:
             raise ApiNetworkError(detail="External API request timed out", timed_out=True) from exc

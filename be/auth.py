@@ -7,8 +7,8 @@ from google.auth.transport import requests
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from db.session import get_db
-from db.models import User
+from orm.session import get_db
+from orm.models import User
 from security import create_access_token
 
 load_dotenv()

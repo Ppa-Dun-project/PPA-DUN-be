@@ -4,6 +4,7 @@ python-dotenv
 
 httpx
 requests
+apscheduler
 
 SQLAlchemy
 pymysql

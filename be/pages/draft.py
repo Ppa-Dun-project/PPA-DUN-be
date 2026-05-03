@@ -1,23 +1,17 @@
 # Draft page API router.
-# Handles draft configuration, player listing with DB-backed PPA scores,
-# pick registration/deletion (persisted to DB), slot assignment, and bootstrap.
-# When a user opens the Draft page, /bootstrap loads all necessary data in one call.
-# Player value scores and recommended bids come from the player_ppa_scores table.
+# Handles draft configuration, player listing, pick registration/deletion (persisted to DB),
+# slot assignment, and bootstrap.
+# Player metadata and value come from the player_caching table; recommended bids
+# are computed in real time via the external API's POST /player/bid/name.
 import asyncio
 import logging
 from typing import Dict, List, Literal, Optional, Set, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from database.draft_store import engine, load_draft_config
+from database.draft_store import load_draft_config
 from database.players_lookup import get_player_by_id
-from ppa_api.ppa_client import (
-    ApiConfigError,
-    ApiError,
-    ApiHttpError,
-    ApiInvalidResponseError,
-    ApiNetworkError,
-    build_ppa_api_client,
-)
+from orm.session import engine
+from ppa_api.ppa_client import ApiError, build_ppa_api_client
 from sqlalchemy import text as sa_text
 
 from security import get_user_id
@@ -104,35 +98,6 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "P": "SP",
 }
 
-# active 칼럼: 1이면 현역, 0이면 은퇴/방출
-# Avoid SELECT * / LIKE joins here: they force broader scans and break against the
-# current stats schema where NL/AL tables do not share identical columns.
-_DRAFT_STATS_QUERY = """
-    SELECT player_name,
-           SUM(HR) AS HR,
-           SUM(RBI) AS RBI,
-           SUM(SB) AS SB,
-           SUM(H) / NULLIF(SUM(AB), 0) AS AVG
-    FROM (
-        SELECT TRIM(Name) AS player_name, AB, H, HR, RBI, SB
-        FROM players_stats_nl_2025
-        UNION ALL
-        SELECT TRIM(Name) AS player_name, AB, H, HR, RBI, SB
-        FROM players_stats_al_2025
-    ) combined
-    GROUP BY player_name
-"""
-
-_DRAFT_BASE_QUERY = f"""
-    FROM mlb_players_list p
-    LEFT JOIN mlb_team_list t ON p.team_id = t.team_id
-    LEFT JOIN (
-        {_DRAFT_STATS_QUERY}
-    ) s ON s.player_name = p.full_name
-    WHERE p.active = 1
-"""
-
-
 # DB-backed draft storage
 from database.draft_store import (
     ensure_draft_tables,
@@ -171,24 +136,6 @@ SLOT_TEMPLATE_BASE: List[DraftPosition] = [
     "BENCH",
     "BENCH",
 ]
-
-def player_summary_dict(row) -> dict:
-    r = row._mapping
-    raw_pos = r["position"] or "DH"  
-    draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL") 
-    
-    return {
-        "id": str(r["player_id"]),
-        "name": r["full_name"],
-        "positions": [draft_pos],
-        "team": r["abbreviation"] or "",
-        "avg": round(float(r.get("AVG") or 0), 3) or None,
-        "hr": int(r.get("HR") or 0) or None,
-        "rbi": int(r.get("RBI") or 0) or None,
-        "sb": int(r.get("SB") or 0) or None,
-        "ppaValue": float(2.0),
-        "recommendedBid": int(2.0)
-    }
 
 # Clamps a number to a given range. Ensures user input stays within valid bounds.
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
@@ -240,7 +187,6 @@ def draft_player_exists(player_id: str) -> bool:
 
 
 def find_available_slot_index(
-    desired_pos: DraftPosition,
     slot_template: List[DraftPosition],
     occupied: Set[int],
 ) -> int:
@@ -350,25 +296,32 @@ def get_draft_bootstrap(
 
 
 ############################ 선수 데이터 #############################
-# 현역 선수 전체를 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
-# 비로그인 사용자도 ppa-value와 bid 값을 제외하고 사용이 가능해야 하므로 이를 고려한 GuestPlayerSummaryList 사용
+# 현역 batter 전체를 player_caching에서 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
 @router.get("/players", response_model=PlayerSummaryList)
 def get_draft_players():
-    data_sql = sa_text(f"""
-            SELECT p.player_id, p.full_name, p.position, t.abbreviation,
-                s.AVG, s.HR, s.RBI, s.SB
-            {_DRAFT_BASE_QUERY}
-        """)
+    sql = sa_text("""
+        SELECT player_id, name, position, team, avg, hr, rbi, sb
+        FROM player_caching
+    """)
     with engine.connect() as conn:
-        rows = conn.execute(data_sql).fetchall()
-        
+        rows = conn.execute(sql).fetchall()
+
     items = []
-    
     for row in rows:
-        player_data = player_summary_dict(row)
-        items.append(PlayerSummary(**player_data))
-    
-    # 비로그인 사용자에게 보여줄 리스트
+        m = row._mapping
+        raw_pos = m["position"] or "DH"
+        draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL")
+        items.append(PlayerSummary(
+            id=str(m["player_id"]),
+            name=m["name"],
+            positions=[draft_pos],
+            team=m["team"] or "",
+            avg=round(float(m["avg"] or 0), 3) or None,
+            hr=int(m["hr"] or 0) or None,
+            rbi=int(m["rbi"] or 0) or None,
+            sb=int(m["sb"] or 0) or None,
+        ))
+
     return PlayerSummaryList(items=items)
 
 
@@ -387,33 +340,10 @@ async def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
         raise HTTPException(status_code=400, detail="Draft config not found")
     picks = get_user_picks(user_id)
 
-    # 외부 API: AL/NL 선수 목록 병렬 조회
-    client = build_ppa_api_client()
-    columns = ("id", "name", "position", "ab", "r", "hr", "rbi", "sb", "cs", "avg", "player_value")
-    try:
-        al_response, nl_response = await asyncio.gather(
-            client.players_by_league("AL", columns=columns),
-            client.players_by_league("NL", columns=columns),
-        )
-    except ApiHttpError as exc:
-        raise HTTPException(status_code=502, detail=f"External API error: {exc.detail}")
-    except ApiNetworkError as exc:
-        status = 504 if exc.timed_out else 503
-        raise HTTPException(status_code=status, detail=exc.detail)
-    except ApiInvalidResponseError:
-        raise HTTPException(status_code=502, detail="Invalid response from external API")
-    except ApiConfigError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    api_players = (al_response.get("players") or []) + (nl_response.get("players") or [])
-
-    # 외부 API 응답에 id가 들어있다고 전제. id 없는 항목은 건너뜀.
-    matched: List[Tuple[str, dict]] = []
-    for api_player in api_players:
-        api_id = api_player.get("id")
-        if api_id is None:
-            continue
-        matched.append((str(api_id), api_player))
+    # 로컬 DB cache: 활성 batter (id + player_value) 한 번에 조회
+    sql = sa_text("SELECT player_id, player_value FROM player_caching")
+    with engine.connect() as conn:
+        cache_rows = conn.execute(sql).fetchall()
 
     # bid 계산용 컨텍스트 구성
     my_picks = [p for p in picks if p.draftedByTeamId == "team-0"]
@@ -429,46 +359,39 @@ async def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
         "my_remaining_budget": max(0, budget - my_spent),
         "my_remaining_roster_spots": max(0, roster - len(my_picks)),
         "drafted_players_count": len(picks),
+        "my_positions_filled": [p.slotPos for p in my_picks],
     }
 
     # 각 선수에 대해 bid 병렬 호출. 세마포어로 동시성 상한을 둬서 in-flight 요청 폭주 방지.
     # 개별 bid 실패는 해당 선수 bid만 0으로 반환하고 전체 응답은 유지.
-    semaphore = asyncio.Semaphore(50)
+    # async with로 PpaApiClient를 열어 모든 호출이 같은 connection pool 사용 (TCP/TLS 재활용).
+    semaphore = asyncio.Semaphore(30)
+    player_ids = [int(r._mapping["player_id"]) for r in cache_rows]
 
-    async def fetch_bid(api_player: dict) -> int:
-        payload = {
-            "player_name": api_player.get("name"),
-            "position": api_player.get("position"),
-            "stats": {
-                "player_type": "batter",
-                "AB": int(api_player.get("ab") or 0),
-                "R": int(api_player.get("r") or 0),
-                "HR": int(api_player.get("hr") or 0),
-                "RBI": int(api_player.get("rbi") or 0),
-                "SB": int(api_player.get("sb") or 0),
-                "CS": int(api_player.get("cs") or 0),
-                "AVG": float(api_player.get("avg") or 0.0),
-            },
-            "league_context": league_context,
-            "draft_context": draft_context,
-        }
-        async with semaphore:
-            try:
-                response = await client.player_bid(payload)
-            except ApiError as exc:
-                logger.warning("player_bid failed for %s: %s", payload.get("player_name"), exc)
-                return 0
-        return int(response.get("recommended_bid") or 0)
+    async with build_ppa_api_client() as client:
+        async def fetch_bid(player_id: int) -> int:
+            payload = {
+                "player_id": player_id,
+                "league_context": league_context,
+                "draft_context": draft_context,
+            }
+            async with semaphore:
+                try:
+                    response = await client.player_bid(payload)
+                except ApiError as exc:
+                    logger.warning("player_bid failed for player_id=%s: %s", player_id, exc)
+                    return 0
+            return int(response.get("recommended_bid") or 0)
 
-    bids = await asyncio.gather(*[fetch_bid(ap) for _, ap in matched])
+        bids = await asyncio.gather(*[fetch_bid(pid) for pid in player_ids])
 
     items = [
         DraftPlayerValue(
-            playerId=player_id,
-            ppaValue=float(api_player.get("player_value") or 0.0),
+            playerId=str(r._mapping["player_id"]),
+            ppaValue=float(r._mapping["player_value"] or 0.0),
             recommendedBid=bid,
         )
-        for (player_id, api_player), bid in zip(matched, bids)
+        for r, bid in zip(cache_rows, bids)
     ]
 
     return DraftPlayerValueList(items=items)
@@ -519,7 +442,6 @@ def upsert_draft_pick_endpoint(
     ########################### 드래프트 한 선수를 취소 후 다른 선수를 등록하는 경우 ############################
     # 현재는 그냥 가장 먼저 나오는 빈 슬롯에 배치하는 걸로 되어 있음. (포지션 규칙 없이)
     resolved_slot_index = find_available_slot_index(
-        payload.slotPos,
         slot_template,
         occupied,
     )
