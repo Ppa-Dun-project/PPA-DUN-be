@@ -1,19 +1,13 @@
 # CRUD operations for draft_config and draft_picks tables.
 # Manages per-user draft settings and pick records.
 import json
-import os
 from datetime import datetime
 from typing import List, Optional
 
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect, text, MetaData, Table, Column, Integer, String, DateTime, JSON
+from sqlalchemy import inspect, text, MetaData, Table, Column, Integer, String, DateTime, JSON
 
-load_dotenv()
-DATABASE_URL = (
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-)
-engine = create_engine(DATABASE_URL)
+from orm.session import engine
+
 metadata = MetaData()
 
 
@@ -220,36 +214,4 @@ def reset_draft(user_id: str) -> None:
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM draft_picks WHERE user_id = :user_id"), {"user_id": user_id})
         conn.execute(text("DELETE FROM draft_config WHERE user_id = :user_id"), {"user_id": user_id})
-        conn.commit()
-
-
-def save_all_picks(user_id: str, picks: List[dict]) -> None:
-    """Bulk saves all picks for a user (deletes existing, then inserts new)."""
-    now = datetime.utcnow()
-    with engine.connect() as conn:
-        conn.execute(text("DELETE FROM draft_picks WHERE user_id = :user_id"), {"user_id": user_id})
-
-        if picks:
-            sql = text("""
-                INSERT INTO draft_picks
-                    (user_id, player_id, drafted_by_team_id, slot_index,
-                     slot_pos, bid, pick_type, created_at)
-                VALUES
-                    (:user_id, :player_id, :drafted_by_team_id, :slot_index,
-                     :slot_pos, :bid, :pick_type, :now)
-            """)
-            rows = [
-                {
-                    "user_id": user_id,
-                    "player_id": p["playerId"],
-                    "drafted_by_team_id": p["draftedByTeamId"],
-                    "slot_index": p["slotIndex"],
-                    "slot_pos": p["slotPos"],
-                    "bid": p.get("bid"),
-                    "pick_type": p["type"],
-                    "now": now,
-                }
-                for p in picks
-            ]
-            conn.execute(sql, rows)
         conn.commit()

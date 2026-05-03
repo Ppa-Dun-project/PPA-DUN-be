@@ -2,16 +2,21 @@
 # Registers all page routers (draft, home, myteam, players, ppa) and
 # configures CORS middleware so the frontend dev server can reach the backend.
 import os
+from contextlib import asynccontextmanager
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from ai import router as ai_router
 from auth import router as auth_router
-from draft import router as draft_router
-from home import router as home_router
-from myteam import router as myteam_router
-from playerinfo import router as players_router
+from backend.be.pages.draft import router as draft_router
+from backend.be.pages.home import router as home_router
+from backend.be.pages.myteam import router as myteam_router
+from backend.be.pages.playerinfo import router as players_router
 
-from db.session import engine, Base
-from db.models import User  # noqa: F401 — import so SQLAlchemy registers the table
+from database.player_cache_store import ensure_player_cache_table, refresh_player_cache
+from orm.session import engine, Base
+from orm.models import User  # noqa: F401 — import so SQLAlchemy registers the table
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -21,11 +26,29 @@ load_dotenv()
 
 # Auto-create all DB tables on startup (if they don't exist yet)
 Base.metadata.create_all(bind=engine)
+ensure_player_cache_table()
+
+
+# player_caching 테이블을 매일 04:00 ET (America/New_York, DST 자동 반영)에 갱신.
+# 외부 API에서 AL+NL 선수 목록을 받아 UPSERT.
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        refresh_player_cache,
+        CronTrigger(hour=4, minute=0, timezone="America/New_York"),
+    )
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+
 
 # 백엔드 서버를 uvicorn main:app으로 실행하면 시작되는 것.
 # app이 요청을 받아서 알맞은 함수로 연결해줌
 # app은 모든 엔드포인트, 라우터, 미들웨어 (CORS)를 한번에 관리함
-app = FastAPI(title="PPA-Dun API")
+app = FastAPI(title="PPA-Dun API", lifespan=lifespan)
 
 # 각 파일에서 정의한 엔드포인트들을 하나의 앱에 합침
 # app - 서버 자체 / router - 각 파일의 엔드포인트 묶음

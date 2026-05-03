@@ -1,13 +1,15 @@
 # My Team page API router.
 # Returns the user's drafted roster and budget summary.
 # Filtering, sorting, and pagination are handled by the frontend.
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import bindparam, text as sa_text
 
 from database.draft_store import load_draft_config
-from draft import find_draft_player, get_user_picks
+from orm.session import engine
+from backend.be.pages.draft import get_user_picks
 from security import get_user_id
 
 router = APIRouter(prefix="/api/my-team", tags=["my-team"])
@@ -33,65 +35,57 @@ class MyTeamPlayersResponse(BaseModel):
     remainingBudget: int
 
 
-# ID를 통해 야구 선수의 드래프트 정보 + 스탯 정보 불러옴
-def player_drafts_stats_collection(
-    player_id: str,
-    slot_pos: str,
-    bid: Optional[int],
-) -> Optional[MyTeamPlayerOut]:
-    
-    # DraftPlayerOut 타입의 객체 반환
-    draft_player = find_draft_player(player_id)
-
-    if not draft_player:
-        return None
-
-    # 벤치 선수는 원래 포지션을 괄호 안에 표시 (예: "BENCH(1B)")
-    if slot_pos == "BENCH":
-        original_pos = draft_player.positions[0] if draft_player.positions else "UTIL"
-        position = f"BENCH({original_pos})"
-    else:
-        position = slot_pos
-
-    return MyTeamPlayerOut(
-        id=draft_player.id,
-        name=draft_player.name,
-        pos=position,
-        cost=int(bid or 0),
-        team=draft_player.team,
-        avg=float(draft_player.avg or 0.0),
-        hr=int(draft_player.hr or 0),
-        rbi=int(draft_player.rbi or 0),
-        sb=int(draft_player.sb or 0),
-        ppaValue=float(draft_player.ppaValue),
+# 내 팀 (team-0) 픽들에 대해 player_caching에서 한 번에 정보를 받아 MyTeamPlayerOut 리스트로 변환.
+# 픽 수만큼 SQL 쿼리하던 N+1 패턴을 단일 IN 쿼리로 대체.
+def pick_my_players(user_id: str) -> List[MyTeamPlayerOut]:
+    picks = get_user_picks(user_id)
+    mine = sorted(
+        (p for p in picks if p.draftedByTeamId == "team-0"),
+        key=lambda p: p.slotIndex,
     )
 
-# 사용자(나) 가 드래프트 한 선수 목록과 스탯 데이터 뽑아내기
-def pick_my_players(user_id: str) -> List[MyTeamPlayerOut]:
-    
-    # user_id 사용자가 생성한 드래프트 세션에 속한 선수들을 통째로 가져옴
-    picks = get_user_picks(user_id)
-    
-    # 그 중에서 내 팀에 드래프트 된 선수만 골라냄
-    my_picks = []
-    for pick in picks:
-        if pick.draftedByTeamId == "team-0":
-            my_picks.append(pick)
+    if not mine:
+        return []
 
-    # 내 팀 골라낸거 깔끔하게 정렬
-    mine = sorted(my_picks, key=lambda pick: pick.slotIndex)
+    player_ids = [int(p.playerId) for p in mine]
+    sql = sa_text("""
+        SELECT player_id, position, team, avg, hr, rbi, sb, player_value, name
+        FROM player_caching
+        WHERE player_id IN :ids
+    """).bindparams(bindparam("ids", expanding=True))
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"ids": player_ids}).fetchall()
+
+    cache_by_id = {r._mapping["player_id"]: r._mapping for r in rows}
 
     items: List[MyTeamPlayerOut] = []
-    
-    # 위에서 선수들의 드래프트 정보만 가져왔으므로, 선수별 스탯 정보가 포함된걸로 다시 가져옴
     for pick in mine:
-        mapped = player_drafts_stats_collection(
-            player_id=pick.playerId,
-            slot_pos=pick.slotPos,
-            bid=pick.bid,
-        )
-        if mapped:
-            items.append(mapped)
+        m = cache_by_id.get(int(pick.playerId))
+        if not m:
+            continue
+
+        # BENCH 슬롯은 원래 포지션을 괄호로 표기 (예: "BENCH(OF)").
+        # DH/TWP는 UTIL로 통일 (기존 동작 유지).
+        if pick.slotPos == "BENCH":
+            raw_pos = m["position"] or "UTIL"
+            original_pos = "UTIL" if raw_pos in ("DH", "TWP") else raw_pos
+            display_pos = f"BENCH({original_pos})"
+        else:
+            display_pos = pick.slotPos
+
+        items.append(MyTeamPlayerOut(
+            id=str(m["player_id"]),
+            name=m["name"],
+            pos=display_pos,
+            cost=int(pick.bid or 0),
+            team=m["team"] or "",
+            avg=float(m["avg"] or 0.0),
+            hr=int(m["hr"] or 0),
+            rbi=int(m["rbi"] or 0),
+            sb=int(m["sb"] or 0),
+            ppaValue=float(m["player_value"] or 0.0),
+        ))
 
     return items
 
