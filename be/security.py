@@ -13,7 +13,7 @@ load_dotenv()
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
-JWT_EXP_MINUTES = int(os.environ.get("JWT_EXP_MINUTES", "10080"))
+JWT_EXP_MINUTES = int(os.environ.get("JWT_EXP_MINUTES", "1440"))
 
 # 프론트의 HTTP 요청 헤더 중 Authorization 헤더를 검사하여 토큰 추출.
 # 즉, "Bearer" 접두사 검수 후, 접두사와 토큰 문자열을 분리하여 저장.
@@ -37,22 +37,6 @@ def create_access_token(user_id: int) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def decode_user_id(credentials: str) -> int:
-    try:
-        payload = jwt.decode(
-            credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM]
-        )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    try:
-        return int(payload["sub"])  # 유저 식별자 반환
-    
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(status_code=401, detail="Invalid token elements (sub)")
-
 
 # 요청 헤더의 JWT를 검증하고 유저 ID를 뽑아냄 (즉, 토큰을 풀어내는 함수) / 보호된 엔드포인트마다 이 함수가 매 요청 앞에 끼어들어서 검증함.
 # HTTPAuthorizationCredentials: HTTPBearer가 요청 헤더에서 분리해놓은 인증 정보를 담아두는 데이터 객체
@@ -69,4 +53,18 @@ def get_user_id( auth: HTTPAuthorizationCredentials | None = Depends(bearer_sche
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header",
         )
-    return decode_user_id(auth.credentials)
+    
+    try:
+        payload = jwt.decode(
+            auth.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM]
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        return int(payload["sub"])  # 유저 식별자 반환
+    
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token elements (sub)")

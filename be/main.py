@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from ai import router as ai_router
+from backend.be.pages.ai import router as ai_router
 from auth import router as auth_router
 from pages.draft import router as draft_router
 from pages.home import router as home_router
