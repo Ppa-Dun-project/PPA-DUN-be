@@ -5,11 +5,11 @@
 # are computed in real time via the external API's POST /player/bid/name.
 import asyncio
 import logging
-from typing import Dict, List, Literal, Optional, Set, Tuple
+from datetime import datetime
+from typing import Dict, List, Literal, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from database.draft_store import load_draft_config
-from database.players_lookup import get_player_by_id
 from orm.session import engine
 from ppa_api.ppa_client import ApiError, build_ppa_api_client
 from sqlalchemy import text as sa_text
@@ -80,13 +80,42 @@ class PlayerDraftStatus(BaseModel):
 class PlayerDraftStatusIndex(PlayerDraftStatus):
     slotIndex: int
 
-class DraftPicksInRoom(BaseModel):
-    userId: str
-    items: List[PlayerDraftStatusIndex]
+# ── Session-related models ──
 
-class SavedDraftStatus(BaseModel):
+class SessionSummary(BaseModel):
+    id: int
+    name: str
+    createdAt: datetime
+    updatedAt: datetime
+    lastOpenedAt: datetime
+
+
+class SessionList(BaseModel):
+    items: List[SessionSummary]
+
+
+class SessionDetail(BaseModel):
+    id: int
+    name: str
     config: DraftConfig
     teams: List[DraftTeam]
+    picks: List[PlayerDraftStatusIndex]
+
+
+class CreateSessionPayload(BaseModel):
+    name: str
+    config: DraftConfig
+    picks: List[PlayerDraftStatusIndex]
+
+
+class UpdateSessionPayload(BaseModel):
+    name: str
+    picks: List[PlayerDraftStatusIndex]
+
+
+# /players/values는 unsaved 드래프트도 추천가를 받아야 하므로 sessionId가 아닌 body로 직접 전달.
+class PlayerValuesPayload(BaseModel):
+    config: DraftConfig
     picks: List[PlayerDraftStatusIndex]
 
 
@@ -100,42 +129,17 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
 
 # DB-backed draft storage
 from database.draft_store import (
-    ensure_draft_tables,
+    MAX_SESSIONS_PER_USER,
+    create_session,
+    list_sessions,
+    get_session,
+    rename_session,
+    touch_session,
+    delete_session,
     save_draft_config,
     load_draft_picks,
-    upsert_draft_pick,
-    delete_draft_pick,
-    reset_draft,
+    replace_session_picks,
 )
-ensure_draft_tables()
-
-SLOT_TEMPLATE_BASE: List[DraftPosition] = [
-    "SP",
-    "SP",
-    "RP",
-    "SP",
-    "RP",
-    "C",
-    "1B",
-    "2B",
-    "3B",
-    "SS",
-    "OF",
-    "OF",
-    "OF",
-    "UTIL",
-    "UTIL",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-    "BENCH",
-]
 
 # Clamps a number to a given range. Ensures user input stays within valid bounds.
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
@@ -161,11 +165,11 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
 
 
 
-# DB에서 드래프트 픽 목록을 불러오는 함수. user_id로 특정 사용자가 생성한 드래프트 세션을 통째로 가져옴.
-def get_user_picks(user_id: str) -> List[PlayerDraftStatusIndex]:
-    
+# DB에서 드래프트 픽 목록을 불러오는 함수. session_id로 특정 세션의 모든 픽을 통째로 가져옴.
+def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
+
     # 야구 선수 별 드래프트에 관련된 개별 정보를 다 가져옴 (스탯은 제외)
-    rows = load_draft_picks(user_id)
+    rows = load_draft_picks(session_id)
     
     # load_draft_picks 함수에서 이미 dict 형식으로 반환해옴
     # dict 형식에는 key & value
@@ -180,23 +184,6 @@ def get_user_picks(user_id: str) -> List[PlayerDraftStatusIndex]:
         )
         for r in rows
     ]
-
-# Checks whether an active player exists for the given player_id.
-def draft_player_exists(player_id: str) -> bool:
-    return get_player_by_id(player_id) is not None
-
-
-def find_available_slot_index(
-    slot_template: List[DraftPosition],
-    occupied: Set[int],
-) -> int:
-    # Position rule removed: assign the first open slot regardless of player position.
-    for i, _slot in enumerate(slot_template):
-        if i in occupied:
-            continue
-        return i
-    return -1
-
 
 
 # 드래프트 세션 normalizing
@@ -238,42 +225,77 @@ def normalized_config(
     return config, teams
 
 
+# 세션 소유권 체크. 다른 유저의 session_id 접근 시 404 (존재 여부 노출 안 함).
+# 반환된 dict는 호출자가 name 등 메타데이터로 활용 가능 — 체크 한 번으로 두 가지 일을 끝냄.
+def _verify_session_owner(session_id: int, user_id: str) -> dict:
+    session = get_session(session_id)
+    if session is None or session["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+# Pydantic picks → replace_session_picks가 받는 dict 형태로 변환.
+def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
+    return [
+        {
+            "player_id": p.playerId,
+            "drafted_by_team_id": p.draftedByTeamId,
+            "slot_index": p.slotIndex,
+            "slot_pos": p.slotPos,
+            "bid": p.bid,
+            "pick_type": p.type,
+        }
+        for p in picks
+    ]
 
 
 
-############################ 드래프트 현황 #############################
-# 드래프트 페이지 초기 마운트시 프론트가 가장 먼저 호출하는 통합 엔드포인트
-@router.get("/bootstrap", response_model=SavedDraftStatus)
-def get_draft_bootstrap(
-    league_type: str = Query(alias="leagueType"),
-    budget: int = Query(),
-    roster_players: int = Query(alias="rosterPlayers"),
-    my_team_name: str = Query(alias="myTeamName"),
-    opp_team_names_raw: str = Query(default="", alias="oppTeamNames"),
-    opponents_count: int = Query(alias="opponentsCount"),
+############################ 세션 관리 #############################
+
+# 내 세션 목록. 최근에 연 순으로 정렬됨.
+@router.get("/sessions", response_model=SessionList)
+def list_user_sessions(current_user_id: int = Depends(get_user_id)):
+    user_id = str(current_user_id)
+    rows = list_sessions(user_id)
+    items = [
+        SessionSummary(
+            id=r["id"],
+            name=r["name"],
+            createdAt=r["createdAt"],
+            updatedAt=r["updatedAt"],
+            lastOpenedAt=r["lastOpenedAt"],
+        )
+        for r in rows
+    ]
+    return SessionList(items=items)
+
+
+# 새 세션 + config 생성. 이미 MAX_SESSIONS_PER_USER 개면 400.
+@router.post("/sessions", response_model=SessionDetail)
+def create_user_session(
+    payload: CreateSessionPayload,
     current_user_id: int = Depends(get_user_id),
 ):
     user_id = str(current_user_id)
 
-    # 프론트에서 보낸 상대팀 이름 뽑아내기
-    opp_team_names: List[str] = []
-    for name in opp_team_names_raw.split(","):
-        # 문자열 앞뒤 공백 제거
-        trimmed = name.strip()
-        if trimmed:
-            opp_team_names.append(trimmed)
-    
     config, teams = normalized_config(
-        league_type=league_type,
-        budget=budget,
-        roster_players=roster_players,
-        my_team_name=my_team_name,
-        opp_team_names=opp_team_names,
-        opponents_count=opponents_count,
+        league_type=payload.config.leagueType,
+        budget=payload.config.budget,
+        roster_players=payload.config.rosterPlayers,
+        my_team_name=payload.config.myTeamName,
+        opp_team_names=payload.config.oppTeamNames,
+        opponents_count=payload.config.opponentsCount,
     )
 
-    # DB의 draft_config 테이블에 드래프트 설정 정보 저장
+    name = payload.name.strip() or "Untitled Draft"
+
+    try:
+        session_id = create_session(user_id=user_id, name=name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     save_draft_config(
+        session_id=session_id,
         user_id=user_id,
         league_type=config.leagueType,
         budget=config.budget,
@@ -283,16 +305,95 @@ def get_draft_bootstrap(
         opponents_count=config.opponentsCount,
     )
 
-    # 사용자가 생성한 드래프트 세션의 현황 불러오기
-    # 혹여나 사용자가 저번에 하다가 나간 드래프트 세션이 있는 경우.
-    picks = get_user_picks(user_id)
-    
-    
-    return SavedDraftStatus(
+    replace_session_picks(session_id, user_id, _picks_to_dicts(payload.picks))
+
+    return SessionDetail(
+        id=session_id,
+        name=name,
+        config=config,
+        teams=teams,
+        picks=payload.picks,
+    )
+
+
+# 특정 세션 로드. config + teams + picks 통째로 반환. last_opened_at 갱신.
+@router.get("/sessions/{session_id}", response_model=SessionDetail)
+def get_session_detail(
+    session_id: int,
+    current_user_id: int = Depends(get_user_id),
+):
+    user_id = str(current_user_id)
+    session = _verify_session_owner(session_id, user_id)
+
+    config_row = load_draft_config(session_id)
+    if config_row is None:
+        # 세션은 있는데 config가 없다 = 데이터 정합성 깨짐. 정상 흐름에선 발생 안 함.
+        raise HTTPException(status_code=404, detail="Session config not found")
+
+    config, teams = normalized_config(
+        league_type=config_row["league_type"],
+        budget=config_row["budget"],
+        roster_players=config_row["roster_players"],
+        my_team_name=config_row["my_team_name"],
+        opp_team_names=config_row["opp_team_names"] or [],
+        opponents_count=config_row["opponents_count"],
+    )
+
+    picks = get_session_picks(session_id)
+    touch_session(session_id)
+
+    return SessionDetail(
+        id=session_id,
+        name=session["name"],
         config=config,
         teams=teams,
         picks=picks,
     )
+
+
+# 세션 덮어쓰기 (Save 버튼). 이름 + picks 통째로 교체. config는 lock이라 안 받음.
+@router.put("/sessions/{session_id}", response_model=SessionDetail)
+def update_user_session(
+    session_id: int,
+    payload: UpdateSessionPayload,
+    current_user_id: int = Depends(get_user_id),
+):
+    user_id = str(current_user_id)
+    _verify_session_owner(session_id, user_id)
+
+    name = payload.name.strip() or "Untitled Draft"
+    rename_session(session_id, name)
+    replace_session_picks(session_id, user_id, _picks_to_dicts(payload.picks))
+
+    config_row = load_draft_config(session_id)
+    config, teams = normalized_config(
+        league_type=config_row["league_type"],
+        budget=config_row["budget"],
+        roster_players=config_row["roster_players"],
+        my_team_name=config_row["my_team_name"],
+        opp_team_names=config_row["opp_team_names"] or [],
+        opponents_count=config_row["opponents_count"],
+    )
+    return SessionDetail(
+        id=session_id,
+        name=name,
+        config=config,
+        teams=teams,
+        picks=payload.picks,
+    )
+
+
+# 세션 삭제. CASCADE로 config + picks 자동 삭제됨.
+@router.delete("/sessions/{session_id}", response_model=dict)
+def delete_user_session(
+    session_id: int,
+    current_user_id: int = Depends(get_user_id),
+):
+    user_id = str(current_user_id)
+    _verify_session_owner(session_id, user_id)
+
+    delete_session(session_id)
+    return {"status": "ok", "sessionId": session_id}
 
 
 ############################ 선수 데이터 #############################
@@ -327,18 +428,16 @@ def get_draft_players():
 
 
 
-########################## 드래프트에서 선수 픽 등록/수정 (Add/Taken) ##########################
-# 등록되어있는 선수 remove 기능 만들건지? 현재로서는 add/taken에서만 호출됨
-# 드래프트 세션은 로그인된 사용자만 사용 가능하므로 Depends
-@router.get("/players/values", response_model=DraftPlayerValueList)
-async def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
-    user_id = str(current_user_id)
-
-    # 로컬 DB: 드래프트 설정/픽
-    config = load_draft_config(user_id)
-    if config is None:
-        raise HTTPException(status_code=400, detail="Draft config not found")
-    picks = get_user_picks(user_id)
+########################## 선수별 PPA 가치 + 추천 입찰가 ##########################
+# unsaved 드래프트도 추천가를 받을 수 있도록 sessionId 대신 body로 config + picks를 받음.
+# 드래프트 세션은 로그인된 사용자만 사용 가능하므로 Depends.
+@router.post("/players/values", response_model=DraftPlayerValueList)
+async def get_draft_player_values(
+    payload: PlayerValuesPayload,
+    current_user_id: int = Depends(get_user_id),  # 인증만 필요, user_id는 직접 안 씀
+):
+    config = payload.config
+    picks = payload.picks
 
     # 로컬 DB cache: 활성 batter (id + player_value) 한 번에 조회
     sql = sa_text("SELECT player_id, player_value FROM player_caching")
@@ -348,16 +447,14 @@ async def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
     # bid 계산용 컨텍스트 구성
     my_picks = [p for p in picks if p.draftedByTeamId == "team-0"]
     my_spent = sum(p.bid or 0 for p in my_picks)
-    budget = int(config.get("budget") or 0)
-    roster = int(config.get("roster_players") or 0)
     league_context = {
-        "league_size": int(config.get("opponents_count") or 0) + 1,
-        "roster_size": roster,
-        "total_budget": budget,
+        "league_size": config.opponentsCount + 1,
+        "roster_size": config.rosterPlayers,
+        "total_budget": config.budget,
     }
     draft_context = {
-        "my_remaining_budget": max(0, budget - my_spent),
-        "my_remaining_roster_spots": max(0, roster - len(my_picks)),
+        "my_remaining_budget": max(0, config.budget - my_spent),
+        "my_remaining_roster_spots": max(0, config.rosterPlayers - len(my_picks)),
         "drafted_players_count": len(picks),
         "my_positions_filled": [p.slotPos for p in my_picks],
     }
@@ -370,14 +467,14 @@ async def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
 
     async with build_ppa_api_client() as client:
         async def fetch_bid(player_id: int) -> int:
-            payload = {
+            req_payload = {
                 "player_id": player_id,
                 "league_context": league_context,
                 "draft_context": draft_context,
             }
             async with semaphore:
                 try:
-                    response = await client.player_bid(payload)
+                    response = await client.player_bid(req_payload)
                 except ApiError as exc:
                     logger.warning("player_bid failed for player_id=%s: %s", player_id, exc)
                     return 0
@@ -395,102 +492,3 @@ async def get_draft_player_values(current_user_id: int = Depends(get_user_id)):
     ]
 
     return DraftPlayerValueList(items=items)
-
-
-@router.post("/picks", response_model=DraftPicksInRoom)
-def upsert_draft_pick_endpoint(
-    payload: PlayerDraftStatus,
-    roster_players: int = Query(alias="rosterPlayers", gt=0),
-    current_user_id: int = Depends(get_user_id),
-):
-    user_id = str(current_user_id)
-
-    # 선수의 요약된 스탯 정보를 불러옴
-    ### 이거 좀 최적화 할수 있을거 같은데?????????????????????????????????????????????????????????????????????
-    # 플레이어가 있는지 판단하는거라면 굳이 이 모든 정보를 다 불러올 필요가 없잖음
-    if not draft_player_exists(payload.playerId):
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    # 현재 드래프트 픽 상태를 모두 불러옴 (내 픽, 상대 픽 전부 다)
-    picks = get_user_picks(user_id)
-    
-    
-    # Upsert 지원: 같은 선수를 다시 픽하는 경우, 기존 픽을 제외한 목록으로 슬롯 계산.
-    # next_picks: player_id에 해당하는 선수 제외 나머지 선수들 리스트
-    next_picks: List[PlayerDraftStatusIndex] = []
-    
-    for pick in picks:
-        # DB에서 불러온 id vs 프론트에서 보낸 id
-        # id가 다른 경우에만 넣어라 -> 동일한 선수는 들어가지 않도록 -> 한 선수의 포지션을 바꾸는 경우
-        if pick.playerId != payload.playerId:
-            next_picks.append(pick)
-    
-    # roster 야구 선수 수에 따라 슬롯 템플릿 자름. 만약 23명보다 적다면 뒤에 있는 BENCH 슬롯부터 사라짐.
-    # 슬라이스가 리스트 길이를 자연스럽게 상한으로 처리하므로 상한 clamp는 불필요.
-    slot_template = SLOT_TEMPLATE_BASE[:roster_players]
-    
-    
-    # 이 팀(draftedByTeamId)이 이미 차지한 슬롯 번호들을 집합으로 모음.
-    occupied: Set[int] = set()
-    
-    # player_id에 해당하는 선수 제외 나머지 선수들이 차지하고 있는 슬롯 인덱스 뽑아내기
-    for pick in next_picks:
-        if pick.draftedByTeamId == payload.draftedByTeamId:
-            occupied.add(pick.slotIndex)
-    
-    
-    ########################### 드래프트 한 선수를 취소 후 다른 선수를 등록하는 경우 ############################
-    # 현재는 그냥 가장 먼저 나오는 빈 슬롯에 배치하는 걸로 되어 있음. (포지션 규칙 없이)
-    resolved_slot_index = find_available_slot_index(
-        slot_template,
-        occupied,
-    )
-    
-    # 남은 자리가 없는 경우
-    if resolved_slot_index == -1:
-        raise HTTPException(status_code=409, detail="No available slot for team roster")
-
-    resolved_slot_pos = slot_template[resolved_slot_index]
-
-    # Persist pick to DB
-    upsert_draft_pick(
-        user_id=user_id,
-        player_id=payload.playerId,
-        drafted_by_team_id=payload.draftedByTeamId,
-        slot_index=resolved_slot_index,
-        slot_pos=resolved_slot_pos,
-        bid=payload.bid,
-        pick_type=payload.type,
-    )
-
-    all_picks = get_user_picks(user_id)
-    return DraftPicksInRoom(userId=user_id, items=all_picks)
-
-
-############################### 야구 선수 드래프트에서 삭제 (픽 취소) ###############################
-@router.delete("/picks/{player_id}", response_model=DraftPicksInRoom)
-def delete_draft_pick_endpoint(
-    player_id: str,
-    current_user_id: int = Depends(get_user_id),
-):
-    user_id = str(current_user_id)
-
-    deleted = delete_draft_pick(user_id, player_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Pick not found")
-
-    all_picks = get_user_picks(user_id)
-    return DraftPicksInRoom(userId=user_id, items=all_picks)
-
-
-
-
-# 추후 드래프트 리셋 기능을 만들게 되면 사용.
-@router.delete("/reset", response_model=dict)
-def reset_draft_endpoint(
-    current_user_id: int = Depends(get_user_id),
-):
-    user_id = str(current_user_id)
-
-    reset_draft(user_id)
-    return {"status": "ok", "userId": user_id}
