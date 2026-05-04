@@ -54,11 +54,61 @@ class PlayerOut(BaseModel):
     stats: PlayerStats
 
 
+# Used by HomePage Injured Players strip + "View All" popup.
+class InjuredPlayer(BaseModel):
+    player_id: int
+    name: str
+    position: Optional[str] = None
+    team: Optional[str] = None
+    primary_number: Optional[str] = None
+    injury_status: str
+    player_value: Optional[float] = None
+
+
 def parse_height_to_inches(height_str: str) -> int:
     match = re.match(r"(\d+)'\s*(\d+)\"?", height_str or "")
     if match:
         return int(match.group(1)) * 12 + int(match.group(2))
     return 0
+
+
+# Currently injured players, sorted by player_value desc.
+# - Strip on HomePage uses ?limit=3
+# - "View All" popup omits limit → returns full list
+# - Defined BEFORE /{player_id} so the literal "/injured" path matches first.
+@router.get("/injured", response_model=List[InjuredPlayer])
+def list_injured(limit: Optional[int] = None):
+    sql = (
+        "SELECT player_id, name, position, team, primary_number, "
+        "       injury_status, player_value "
+        "FROM player_caching "
+        "WHERE injury_status IS NOT NULL "
+        "ORDER BY player_value DESC"
+    )
+    params: dict = {}
+    if limit is not None:
+        sql += " LIMIT :limit"
+        params["limit"] = limit
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+
+    return [
+        InjuredPlayer(
+            player_id=r._mapping["player_id"],
+            name=r._mapping["name"],
+            position=r._mapping["position"],
+            team=r._mapping["team"],
+            primary_number=r._mapping["primary_number"],
+            injury_status=r._mapping["injury_status"],
+            player_value=(
+                float(r._mapping["player_value"])
+                if r._mapping["player_value"] is not None
+                else None
+            ),
+        )
+        for r in rows
+    ]
 
 
 # player_caching 테이블에서 선수의 personal info + 통합 스탯 + value를 단일 쿼리로 조회.
