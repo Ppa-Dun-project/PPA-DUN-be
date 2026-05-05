@@ -14,7 +14,7 @@ from pages.home import router as home_router
 from pages.myteam import router as myteam_router
 from pages.playerinfo import router as players_router
 
-from database.player_cache_store import ensure_player_cache_table, refresh_player_cache
+from database.player_cache_store import refresh_player_cache
 from orm.session import engine, Base
 from orm.models import User  # noqa: F401 — import so SQLAlchemy registers the table
 
@@ -24,13 +24,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-# Auto-create all DB tables on startup (if they don't exist yet)
+# Auto-create ORM-managed DB tables on startup (if they don't exist yet)
 Base.metadata.create_all(bind=engine)
-ensure_player_cache_table()
 
 
-# player_caching 테이블을 매일 04:00 ET (America/New_York, DST 자동 반영)에 갱신.
-# 외부 API에서 AL+NL 선수 목록을 받아 UPSERT.
+# batter_caching/pitcher_caching 테이블을 매일 04:00 ET (America/New_York, DST 자동 반영)에 갱신.
+# 외부 API에서 AL+NL 타자/투수 목록을 받아 UPSERT.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler = AsyncIOScheduler()

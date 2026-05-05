@@ -1,5 +1,5 @@
 # Async HTTP client for the external PPA valuation API.
-# Sends requests to /health, /player/value, /player/bid, /players, /players/{name}
+# Sends requests to /health, /player/bid/id, /players/batters, /players/pitchers
 # using httpx.AsyncClient.
 # Defines exception classes (HTTP errors, timeouts, invalid responses)
 # so the service layer can map them to appropriate HTTP status codes.
@@ -91,12 +91,13 @@ class PpaApiClient:
     # 야구 선수 입찰가 추천. payload 형식은 호출자 책임.
     # 신규 스펙: {player_id, league_context, draft_context: {..., my_positions_filled}}
     async def player_bid(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self.request_json("POST", "/player/bid/name", body=payload, requires_auth=True)
+        return await self.request_json("POST", "/player/bid/id", body=payload, requires_auth=True)
 
     # 리그 전체 선수 목록 + valuation score 조회
     # league는 "AL" 또는 "NL", columns는 반환받을 필드 이름 리스트 (None이면 API 기본값 사용)
-    async def players_by_league(
+    async def _players_by_league(
         self,
+        path: str,
         league: str,
         columns: Optional[Iterable[str]] = None,
     ) -> dict[str, Any]:
@@ -109,11 +110,25 @@ class PpaApiClient:
 
         return await self.request_json(
             "GET",
-            "/players",
+            path,
             body=None,
             requires_auth=True,
             query_params=query_params,
         )
+
+    async def batters_by_league(
+        self,
+        league: str,
+        columns: Optional[Iterable[str]] = None,
+    ) -> dict[str, Any]:
+        return await self._players_by_league("/players/batters", league, columns)
+
+    async def pitchers_by_league(
+        self,
+        league: str,
+        columns: Optional[Iterable[str]] = None,
+    ) -> dict[str, Any]:
+        return await self._players_by_league("/players/pitchers", league, columns)
 
     ############## HTTP 요청을 보내고 응답 받는 형식 생성 ###############
     # API 서버와 주고 받을 형식 구상, 요청 전송 및 응답 처리

@@ -30,8 +30,15 @@ def list_injured(limit: Optional[int] = None):
     sql = (
         "SELECT player_id, name, position, team, primary_number, "
         "       injury_status, player_value "
-        "FROM player_caching "
-        "WHERE injury_status IS NOT NULL "
+        "FROM ("
+        "  SELECT player_id, name, position, team, primary_number, injury_status, player_value "
+        "  FROM batter_caching "
+        "  WHERE injury_status IS NOT NULL "
+        "  UNION ALL "
+        "  SELECT player_id, name, position, team, primary_number, injury_status, player_value "
+        "  FROM pitcher_caching "
+        "  WHERE injury_status IS NOT NULL "
+        ") AS injured_players "
         "ORDER BY player_value DESC"
     )
     params: dict = {}

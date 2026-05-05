@@ -1,8 +1,8 @@
 # Draft page API router.
 # Handles draft configuration, player listing, pick registration/deletion (persisted to DB),
 # slot assignment, and bootstrap.
-# Player metadata and value come from the player_caching table; recommended bids
-# are computed in real time via the external API's POST /player/bid/name.
+# Player metadata and value come from the batter_caching table; recommended bids
+# are computed in real time via the external API's POST /player/bid/id.
 import asyncio
 import logging
 from datetime import datetime
@@ -24,18 +24,26 @@ router = APIRouter(prefix="/api/draft", tags=["draft"])
 
 DraftPosition = Literal["C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP", "BENCH"]
 DraftPickType = Literal["mine", "taken"]
+PlayerType = Literal["batter", "pitcher", "two_way"]
 
 # 선수별 드래프트 관련 정보 + 간단 개인 스탯
 # 공통 요소 집합
 class PlayerSummary(BaseModel):
     id: str
     name: str
+    playerType: PlayerType
     positions: List[DraftPosition]
     team: str
     avg: Optional[float] = None
     hr: Optional[int] = None
     rbi: Optional[int] = None
     sb: Optional[int] = None
+    w: Optional[int] = None
+    sv: Optional[int] = None
+    so: Optional[int] = None
+    era: Optional[float] = None
+    whip: Optional[float] = None
+    ip: Optional[float] = None
 
 # 드래프트 세션 설정에 관한 값들
 class DraftConfig(BaseModel):
@@ -124,7 +132,8 @@ _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "C": "C", "1B": "1B", "2B": "2B", "3B": "3B", "SS": "SS",
     "OF": "OF", "LF": "OF", "CF": "OF", "RF": "OF",
     "DH": "UTIL", "TWP": "UTIL", "IF": "SS",
-    "P": "SP",
+    "P": "SP", "SP": "SP", "RP": "RP", "CL": "RP",
+    "LHP": "SP", "RHP": "SP",
 }
 
 # DB-backed draft storage
@@ -144,6 +153,24 @@ from database.draft_store import (
 # Clamps a number to a given range. Ensures user input stays within valid bounds.
 def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, int(value)))
+
+
+def nullable_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    parsed = int(value)
+    return parsed or None
+
+
+def nullable_float(value, digits: int = 3) -> Optional[float]:
+    if value is None:
+        return None
+    parsed = round(float(value), digits)
+    return parsed or None
+
+
+def draft_position_for(raw_position: str | None, fallback: DraftPosition) -> DraftPosition:
+    return _DB_POS_TO_DRAFT.get((raw_position or "").upper(), fallback)
 
 
 # Builds the list of teams for a draft room.
@@ -400,30 +427,69 @@ def delete_user_session(
 # 현역 batter 전체를 player_caching에서 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
 @router.get("/players", response_model=PlayerSummaryList)
 def get_draft_players():
-    sql = sa_text("""
+    batter_sql = sa_text("""
         SELECT player_id, name, position, team, avg, hr, rbi, sb
-        FROM player_caching
+        FROM batter_caching
     """)
-    with engine.connect() as conn:
-        rows = conn.execute(sql).fetchall()
+    pitcher_sql = sa_text("""
+        SELECT player_id, name, position, team, w, sv, so, era, whip, ip
+        FROM pitcher_caching
+    """)
 
-    items = []
-    for row in rows:
+    with engine.connect() as conn:
+        batter_rows = conn.execute(batter_sql).fetchall()
+        pitcher_rows = conn.execute(pitcher_sql).fetchall()
+
+    items_by_id: Dict[int, PlayerSummary] = {}
+
+    for row in batter_rows:
         m = row._mapping
-        raw_pos = m["position"] or "DH"
-        draft_pos = _DB_POS_TO_DRAFT.get(raw_pos, "UTIL")
-        items.append(PlayerSummary(
+        player_id = int(m["player_id"])
+        draft_pos = draft_position_for(m["position"], "UTIL")
+        items_by_id[player_id] = PlayerSummary(
             id=str(m["player_id"]),
-            name=m["name"],
+            name=m["name"] or "",
+            playerType="batter",
             positions=[draft_pos],
             team=m["team"] or "",
-            avg=round(float(m["avg"] or 0), 3) or None,
-            hr=int(m["hr"] or 0) or None,
-            rbi=int(m["rbi"] or 0) or None,
-            sb=int(m["sb"] or 0) or None,
-        ))
+            avg=nullable_float(m["avg"]),
+            hr=nullable_int(m["hr"]),
+            rbi=nullable_int(m["rbi"]),
+            sb=nullable_int(m["sb"]),
+        )
 
-    return PlayerSummaryList(items=items)
+    for row in pitcher_rows:
+        m = row._mapping
+        player_id = int(m["player_id"])
+        draft_pos = draft_position_for(m["position"], "SP")
+        existing = items_by_id.get(player_id)
+        if existing is not None:
+            existing.playerType = "two_way"
+            if draft_pos not in existing.positions:
+                existing.positions.append(draft_pos)
+            existing.w = nullable_int(m["w"])
+            existing.sv = nullable_int(m["sv"])
+            existing.so = nullable_int(m["so"])
+            existing.era = nullable_float(m["era"], 2)
+            existing.whip = nullable_float(m["whip"], 3)
+            existing.ip = nullable_float(m["ip"], 1)
+            continue
+
+        items_by_id[player_id] = PlayerSummary(
+            id=str(m["player_id"]),
+            name=m["name"] or "",
+            playerType="pitcher",
+            positions=[draft_pos],
+            team=m["team"] or "",
+            w=nullable_int(m["w"]),
+            sv=nullable_int(m["sv"]),
+            so=nullable_int(m["so"]),
+            era=nullable_float(m["era"], 2),
+            whip=nullable_float(m["whip"], 3),
+            ip=nullable_float(m["ip"], 1),
+        )
+
+    return PlayerSummaryList(items=list(items_by_id.values()))
 
 
 
@@ -439,8 +505,16 @@ async def get_draft_player_values(
     config = payload.config
     picks = payload.picks
 
-    # 로컬 DB cache: 활성 batter (id + player_value) 한 번에 조회
-    sql = sa_text("SELECT player_id, player_value FROM player_caching")
+    # Local DB cache: active batters + pitchers. Two-way players are collapsed to one row.
+    sql = sa_text("""
+        SELECT player_id, MAX(player_value) AS player_value
+        FROM (
+            SELECT player_id, player_value FROM batter_caching
+            UNION ALL
+            SELECT player_id, player_value FROM pitcher_caching
+        ) AS player_values
+        GROUP BY player_id
+    """)
     with engine.connect() as conn:
         cache_rows = conn.execute(sql).fetchall()
 
