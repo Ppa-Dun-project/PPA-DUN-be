@@ -3,7 +3,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from vertexai import init as vertexai_init
 from vertexai.generative_models import GenerativeModel
 
@@ -30,6 +30,9 @@ def _get_model() -> GenerativeModel:
 
 class PlayerInput(BaseModel):
     name: str
+    playerType: Optional[str] = None
+    team: Optional[str] = None
+    positions: list[str] = Field(default_factory=list)
     ppaValue: float
     recommendedBid: int
     stats: dict
@@ -54,13 +57,19 @@ def _build_prompt(a: PlayerInput, b: PlayerInput) -> str:
     return (
         "Compare these two MLB fantasy baseball players and recommend which is the "
         "better draft pick in 2-3 concise sentences. Focus on value per dollar "
-        "and key stats.\n\n"
+        "and key stats. If a player is a pitcher, interpret ERA and WHIP as lower-is-better.\n\n"
         f"Player A: {a.name}\n"
+        f"  Type: {a.playerType or 'unknown'}\n"
+        f"  Team: {a.team or 'unknown'}\n"
+        f"  Positions: {a.positions}\n"
         f"  PPA Value: {a.ppaValue}\n"
         f"  Recommended Bid: ${a.recommendedBid}\n"
         f"  Value Per Dollar: {_value_per_dollar(a)}\n"
         f"  Stats: {a.stats}\n\n"
         f"Player B: {b.name}\n"
+        f"  Type: {b.playerType or 'unknown'}\n"
+        f"  Team: {b.team or 'unknown'}\n"
+        f"  Positions: {b.positions}\n"
         f"  PPA Value: {b.ppaValue}\n"
         f"  Recommended Bid: ${b.recommendedBid}\n"
         f"  Value Per Dollar: {_value_per_dollar(b)}\n"
