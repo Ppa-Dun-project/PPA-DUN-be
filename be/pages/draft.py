@@ -67,8 +67,8 @@ class PlayerSummaryList(BaseModel):
 
 class DraftPlayerValue(BaseModel):
     playerId: str
-    ppaValue: float
-    recommendedBid: int
+    ppaValue: Optional[float] = None
+    recommendedBid: Optional[int] = None
 
 
 class DraftPlayerValueList(BaseModel):
@@ -191,6 +191,28 @@ def build_draft_teams(my_team_name: str, opp_team_names: List[str], opponents_co
     return teams
 
 
+def normalize_draft_team_id(team_id: str) -> str:
+    if team_id in {"me", "team-me"}:
+        return "team-0"
+    if team_id.startswith("opp") and team_id[3:].isdigit():
+        return f"team-{int(team_id[3:]) + 1}"
+    return team_id
+
+
+def normalize_pick_team_ids(picks: List[PlayerDraftStatusIndex]) -> List[PlayerDraftStatusIndex]:
+    return [
+        PlayerDraftStatusIndex(
+            playerId=p.playerId,
+            draftedByTeamId=normalize_draft_team_id(p.draftedByTeamId),
+            slotIndex=p.slotIndex,
+            slotPos=p.slotPos,
+            bid=p.bid,
+            type=p.type,
+        )
+        for p in picks
+    ]
+
+
 
 # DB에서 드래프트 픽 목록을 불러오는 함수. session_id로 특정 세션의 모든 픽을 통째로 가져옴.
 def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
@@ -203,7 +225,7 @@ def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
     return [
         PlayerDraftStatusIndex(
             playerId=r["playerId"],               # 선수 ID
-            draftedByTeamId=r["draftedByTeamId"], # 해당 선수를 뽑은 팀 ID
+            draftedByTeamId=normalize_draft_team_id(r["draftedByTeamId"]), # 해당 선수를 뽑은 팀 ID
             slotIndex=r["slotIndex"],             # 슬롯 인덱스
             slotPos=r["slotPos"],                 # 배정된 포지션
             bid=r["bid"],                         # 입찰되었던 가격
@@ -266,7 +288,7 @@ def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
     return [
         {
             "player_id": p.playerId,
-            "drafted_by_team_id": p.draftedByTeamId,
+            "drafted_by_team_id": normalize_draft_team_id(p.draftedByTeamId),
             "slot_index": p.slotIndex,
             "slot_pos": p.slotPos,
             "bid": p.bid,
@@ -332,14 +354,15 @@ def create_user_session(
         opponents_count=config.opponentsCount,
     )
 
-    replace_session_picks(session_id, user_id, _picks_to_dicts(payload.picks))
+    picks = normalize_pick_team_ids(payload.picks)
+    replace_session_picks(session_id, user_id, _picks_to_dicts(picks))
 
     return SessionDetail(
         id=session_id,
         name=name,
         config=config,
         teams=teams,
-        picks=payload.picks,
+        picks=picks,
     )
 
 
@@ -390,7 +413,8 @@ def update_user_session(
 
     name = payload.name.strip() or "Untitled Draft"
     rename_session(session_id, name)
-    replace_session_picks(session_id, user_id, _picks_to_dicts(payload.picks))
+    picks = normalize_pick_team_ids(payload.picks)
+    replace_session_picks(session_id, user_id, _picks_to_dicts(picks))
 
     config_row = load_draft_config(session_id)
     config, teams = normalized_config(
@@ -406,7 +430,7 @@ def update_user_session(
         name=name,
         config=config,
         teams=teams,
-        picks=payload.picks,
+        picks=picks,
     )
 
 
@@ -540,7 +564,7 @@ async def get_draft_player_values(
     player_ids = [int(r._mapping["player_id"]) for r in cache_rows]
 
     async with build_ppa_api_client() as client:
-        async def fetch_bid(player_id: int) -> int:
+        async def fetch_bid(player_id: int) -> Optional[int]:
             req_payload = {
                 "player_id": player_id,
                 "league_context": league_context,
@@ -551,15 +575,20 @@ async def get_draft_player_values(
                     response = await client.player_bid(req_payload)
                 except ApiError as exc:
                     logger.warning("player_bid failed for player_id=%s: %s", player_id, exc)
-                    return 0
-            return int(response.get("recommended_bid") or 0)
+                    return None
+            recommended_bid = response.get("recommended_bid")
+            return int(recommended_bid) if recommended_bid is not None else None
 
         bids = await asyncio.gather(*[fetch_bid(pid) for pid in player_ids])
 
     items = [
         DraftPlayerValue(
             playerId=str(r._mapping["player_id"]),
-            ppaValue=float(r._mapping["player_value"] or 0.0),
+            ppaValue=(
+                float(r._mapping["player_value"])
+                if r._mapping["player_value"] is not None
+                else None
+            ),
             recommendedBid=bid,
         )
         for r, bid in zip(cache_rows, bids)
