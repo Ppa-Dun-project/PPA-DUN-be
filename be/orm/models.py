@@ -1,7 +1,6 @@
 from sqlalchemy import (
     Column,
     DateTime,
-    ForeignKey,
     Integer,
     String,
     Text,
@@ -26,17 +25,15 @@ class User(Base):
 class DraftPlayerNote(Base):
     """Per-session free-text memo a user can attach to a player.
     UNIQUE(session_id, player_id) — one note per player per session, upserted.
-    FK on draft_sessions.id with CASCADE so notes auto-delete with the session.
+    NOTE: session_id is logically a FK to draft_sessions.id, but draft_sessions is
+    not an ORM-managed model. Declaring a SQLAlchemy ForeignKey here makes create_all
+    fail at metadata sort time, so the constraint is omitted and session deletion
+    must explicitly clean up notes (see database/draft_store.delete_session).
     """
     __tablename__ = "draft_player_notes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(
-        Integer,
-        ForeignKey("draft_sessions.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    session_id = Column(Integer, nullable=False, index=True)
     user_id = Column(String(100), nullable=False, index=True)
     player_id = Column(String(20), nullable=False)
     note = Column(Text, nullable=False)

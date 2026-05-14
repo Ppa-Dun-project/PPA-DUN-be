@@ -108,13 +108,17 @@ def touch_session(session_id: int) -> None:
 
 
 def delete_session(session_id: int) -> None:
-    """Deletes a session. CASCADE로 config와 picks도 자동 삭제됨."""
-    with engine.connect() as conn:
+    """Deletes a session. CASCADE로 config와 picks는 자동 삭제됨.
+    draft_player_notes는 ORM FK 제약이 없어 명시적으로 삭제한다."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM draft_player_notes WHERE session_id = :session_id"),
+            {"session_id": session_id},
+        )
         conn.execute(
             text("DELETE FROM draft_sessions WHERE id = :session_id"),
             {"session_id": session_id},
         )
-        conn.commit()
 
 
 # ── draft_config CRUD ──
