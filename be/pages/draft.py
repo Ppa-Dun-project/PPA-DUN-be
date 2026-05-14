@@ -128,6 +128,22 @@ class PlayerValuesPayload(BaseModel):
     picks: List[PlayerDraftStatusIndex]
 
 
+# ── Player note models ──
+
+class PlayerNoteItem(BaseModel):
+    playerId: str
+    note: str
+    updatedAt: datetime
+
+
+class PlayerNoteList(BaseModel):
+    items: List[PlayerNoteItem]
+
+
+class UpdateNotePayload(BaseModel):
+    note: str
+
+
 # DB position -> draft position mapping
 _DB_POS_TO_DRAFT: Dict[str, DraftPosition] = {
     "C": "C", "1B": "1B", "2B": "2B", "3B": "3B", "SS": "SS",
@@ -149,6 +165,11 @@ from database.draft_store import (
     save_draft_config,
     load_draft_picks,
     replace_session_picks,
+)
+from database.note_store import (
+    list_notes,
+    upsert_note,
+    delete_note,
 )
 
 # Clamps a number to a given range. Ensures user input stays within valid bounds.
@@ -433,7 +454,7 @@ def update_user_session(
     )
 
 
-# 세션 삭제. CASCADE로 config + picks 자동 삭제됨.
+# 세션 삭제. CASCADE로 config + picks + notes 자동 삭제됨.
 @router.delete("/sessions/{session_id}", response_model=dict)
 def delete_user_session(
     session_id: int,
@@ -444,6 +465,53 @@ def delete_user_session(
 
     delete_session(session_id)
     return {"status": "ok", "sessionId": session_id}
+
+
+############################ 선수 메모 #############################
+# 세션의 모든 메모를 한 번에 반환. FE는 playerId → note dict로 변환해서 사용.
+@router.get("/sessions/{session_id}/notes", response_model=PlayerNoteList)
+def list_session_notes(
+    session_id: int,
+    current_user_id: int = Depends(get_user_id),
+):
+    user_id = str(current_user_id)
+    _verify_session_owner(session_id, user_id)
+
+    rows = list_notes(session_id)
+    items = [
+        PlayerNoteItem(
+            playerId=str(r["playerId"]),
+            note=r["note"],
+            updatedAt=r["updatedAt"],
+        )
+        for r in rows
+    ]
+    return PlayerNoteList(items=items)
+
+
+# 메모 upsert (빈 문자열이면 삭제). 한 (session, player) 조합당 메모는 항상 0 또는 1개.
+@router.put("/sessions/{session_id}/notes/{player_id}", response_model=dict)
+def update_session_note(
+    session_id: int,
+    player_id: str,
+    payload: UpdateNotePayload,
+    current_user_id: int = Depends(get_user_id),
+):
+    user_id = str(current_user_id)
+    _verify_session_owner(session_id, user_id)
+
+    note = payload.note.strip()
+    if not note:
+        delete_note(session_id, player_id)
+        return {"status": "deleted", "playerId": player_id}
+
+    saved = upsert_note(session_id, user_id, player_id, note)
+    return {
+        "status": "ok",
+        "playerId": saved["playerId"],
+        "note": saved["note"],
+        "updatedAt": saved["updatedAt"].isoformat(),
+    }
 
 
 ############################ 선수 데이터 #############################

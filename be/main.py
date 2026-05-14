@@ -16,7 +16,7 @@ from pages.playerinfo import router as players_router
 
 from database.player_cache_store import refresh_player_cache
 from orm.session import engine, Base
-from orm.models import User  # noqa: F401 — import so SQLAlchemy registers the table
+from orm.models import User, DraftPlayerNote  # noqa: F401 — import so SQLAlchemy registers the tables
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
