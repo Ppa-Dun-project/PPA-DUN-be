@@ -4,15 +4,13 @@ import asyncio
 import logging
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from orm.session import engine
 from ppa_api.ppa_client import build_ppa_api_client
 
 logger = logging.getLogger(__name__)
 
-BATTER_CACHE_TABLE = "batter_caching"
-PITCHER_CACHE_TABLE = "pitcher_caching"
 
 _BATTER_CACHE_COLUMNS = (
     "player_id", "name", "position", "team",
@@ -45,7 +43,7 @@ def _extract_rows(response: dict[str, Any], preferred_key: str) -> list[dict[str
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _upsert_cache_rows(table_name: str, columns: tuple[str, ...], rows: list[dict[str, Any]]) -> None:
+def _upsert_cache_rows(conn, table_name: str, columns: tuple[str, ...], rows: list[dict[str, Any]]) -> None:
     quoted_cols = ", ".join(f"`{col}`" for col in columns)
     placeholders = ", ".join(f":{col}" for col in columns)
     update_clause = ", ".join(
@@ -56,61 +54,86 @@ def _upsert_cache_rows(table_name: str, columns: tuple[str, ...], rows: list[dic
         VALUES ({placeholders})
         ON DUPLICATE KEY UPDATE {update_clause}
     """)
+    conn.execute(sql, rows)
 
+
+def _delete_missing_rows(conn, table_name: str, seen_ids: list[Any]) -> None:
+    sql = text(f"DELETE FROM {table_name} WHERE player_id NOT IN :ids").bindparams(
+        bindparam("ids", expanding=True)
+    )
+    conn.execute(sql, {"ids": seen_ids})
+
+
+def _sync_cache_table(
+    *,
+    label: str,
+    table_name: str,
+    columns: tuple[str, ...],
+    rows_key: str,
+    al_resp: Any,
+    nl_resp: Any,
+) -> None:
+    # asyncio.gather(return_exceptions=True)로 받은 결과를 검사:
+    # 한쪽이라도 실패면 abort. 절반만 갱신되는 잡종 상태 방지.
+    if isinstance(al_resp, Exception) or isinstance(nl_resp, Exception):
+        logger.error(
+            "%s cache refresh aborted: AL=%r NL=%r", label, al_resp, nl_resp
+        )
+        return
+
+    items = _extract_rows(al_resp, rows_key) + _extract_rows(nl_resp, rows_key)
+    rows = [
+        {col: item.get(col) for col in columns}
+        for item in items
+        if item.get("player_id") is not None
+    ]
+
+    if not rows:
+        logger.error("%s cache refresh aborted: empty response", label)
+        return
+
+    seen_ids = [r["player_id"] for r in rows]
+    # UPSERT와 stale-row DELETE를 단일 트랜잭션으로 묶음.
+    # 중간 실패 시 자동 ROLLBACK으로 어제 상태 유지.
     with engine.begin() as conn:
-        conn.execute(sql, rows)
+        _upsert_cache_rows(conn, table_name, columns, rows)
+        _delete_missing_rows(conn, table_name, seen_ids)
+
+    logger.info("%s cache refresh: %d rows synced", label, len(rows))
 
 
 async def refresh_batter_cache() -> None:
     client = build_ppa_api_client()
-    try:
-        al_resp, nl_resp = await asyncio.gather(
-            client.batters_by_league("AL", columns=_BATTER_CACHE_COLUMNS),
-            client.batters_by_league("NL", columns=_BATTER_CACHE_COLUMNS),
-        )
-    except Exception as exc:
-        logger.warning("batter cache refresh failed: %s", exc)
-        return
-
-    batters = _extract_rows(al_resp, "batters") + _extract_rows(nl_resp, "batters")
-    rows = [
-        {col: batter.get(col) for col in _BATTER_CACHE_COLUMNS}
-        for batter in batters
-        if batter.get("player_id") is not None
-    ]
-
-    if not rows:
-        logger.warning("batter cache refresh: no batters returned from API")
-        return
-
-    _upsert_cache_rows(BATTER_CACHE_TABLE, _BATTER_CACHE_COLUMNS, rows)
-    logger.info("batter cache refresh: %d batters upserted", len(rows))
+    al_resp, nl_resp = await asyncio.gather(
+        client.batters_by_league("AL", columns=_BATTER_CACHE_COLUMNS),
+        client.batters_by_league("NL", columns=_BATTER_CACHE_COLUMNS),
+        return_exceptions=True,
+    )
+    _sync_cache_table(
+        label="batter",
+        table_name="batter_caching",
+        columns=_BATTER_CACHE_COLUMNS,
+        rows_key="batters",
+        al_resp=al_resp,
+        nl_resp=nl_resp,
+    )
 
 
 async def refresh_pitcher_cache() -> None:
     client = build_ppa_api_client()
-    try:
-        al_resp, nl_resp = await asyncio.gather(
-            client.pitchers_by_league("AL", columns=_PITCHER_CACHE_COLUMNS),
-            client.pitchers_by_league("NL", columns=_PITCHER_CACHE_COLUMNS),
-        )
-    except Exception as exc:
-        logger.warning("pitcher cache refresh failed: %s", exc)
-        return
-
-    pitchers = _extract_rows(al_resp, "pitchers") + _extract_rows(nl_resp, "pitchers")
-    rows = [
-        {col: pitcher.get(col) for col in _PITCHER_CACHE_COLUMNS}
-        for pitcher in pitchers
-        if pitcher.get("player_id") is not None
-    ]
-
-    if not rows:
-        logger.warning("pitcher cache refresh: no pitchers returned from API")
-        return
-
-    _upsert_cache_rows(PITCHER_CACHE_TABLE, _PITCHER_CACHE_COLUMNS, rows)
-    logger.info("pitcher cache refresh: %d pitchers upserted", len(rows))
+    al_resp, nl_resp = await asyncio.gather(
+        client.pitchers_by_league("AL", columns=_PITCHER_CACHE_COLUMNS),
+        client.pitchers_by_league("NL", columns=_PITCHER_CACHE_COLUMNS),
+        return_exceptions=True,
+    )
+    _sync_cache_table(
+        label="pitcher",
+        table_name="pitcher_caching",
+        columns=_PITCHER_CACHE_COLUMNS,
+        rows_key="pitchers",
+        al_resp=al_resp,
+        nl_resp=nl_resp,
+    )
 
 
 async def refresh_player_cache() -> None:
