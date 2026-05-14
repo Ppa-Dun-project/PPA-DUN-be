@@ -38,6 +38,7 @@ class PlayerSummary(BaseModel):
     hr: Optional[int] = None
     rbi: Optional[int] = None
     sb: Optional[int] = None
+    ab: Optional[int] = None
     w: Optional[int] = None
     sv: Optional[int] = None
     so: Optional[int] = None
@@ -158,15 +159,13 @@ def clamp_int(value: int, min_value: int, max_value: int) -> int:
 def nullable_int(value) -> Optional[int]:
     if value is None:
         return None
-    parsed = int(value)
-    return parsed or None
+    return int(value)
 
 
 def nullable_float(value, digits: int = 3) -> Optional[float]:
     if value is None:
         return None
-    parsed = round(float(value), digits)
-    return parsed or None
+    return round(float(value), digits)
 
 
 def draft_position_for(raw_position: str | None, fallback: DraftPosition) -> DraftPosition:
@@ -452,7 +451,7 @@ def delete_user_session(
 @router.get("/players", response_model=PlayerSummaryList)
 def get_draft_players():
     batter_sql = sa_text("""
-        SELECT player_id, name, position, team, avg, hr, rbi, sb
+        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab
         FROM batter_caching
     """)
     pitcher_sql = sa_text("""
@@ -480,6 +479,7 @@ def get_draft_players():
             hr=nullable_int(m["hr"]),
             rbi=nullable_int(m["rbi"]),
             sb=nullable_int(m["sb"]),
+            ab=nullable_int(m["ab"]),
         )
 
     for row in pitcher_rows:
