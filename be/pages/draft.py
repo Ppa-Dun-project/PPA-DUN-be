@@ -448,20 +448,25 @@ def delete_user_session(
 
 ############################ 선수 데이터 #############################
 # 현역 batter 전체를 player_caching에서 반환. 필터/정렬/페이지네이션은 프론트에서 처리.
+# league 쿼리 파라미터로 "AL" / "NL" 지정 시 해당 리그 선수만 반환. 미지정 시 전체.
 @router.get("/players", response_model=PlayerSummaryList)
-def get_draft_players():
-    batter_sql = sa_text("""
+def get_draft_players(league: Optional[str] = None):
+    where_clause = "WHERE league = :league" if league else ""
+    batter_sql = sa_text(f"""
         SELECT player_id, name, position, team, avg, hr, rbi, sb, ab
         FROM batter_caching
+        {where_clause}
     """)
-    pitcher_sql = sa_text("""
+    pitcher_sql = sa_text(f"""
         SELECT player_id, name, position, team, w, sv, so, era, whip, ip
         FROM pitcher_caching
+        {where_clause}
     """)
 
+    params = {"league": league} if league else {}
     with engine.connect() as conn:
-        batter_rows = conn.execute(batter_sql).fetchall()
-        pitcher_rows = conn.execute(pitcher_sql).fetchall()
+        batter_rows = conn.execute(batter_sql, params).fetchall()
+        pitcher_rows = conn.execute(pitcher_sql, params).fetchall()
 
     items_by_id: Dict[int, PlayerSummary] = {}
 

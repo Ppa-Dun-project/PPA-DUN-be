@@ -12,7 +12,8 @@ from ppa_api.ppa_client import build_ppa_api_client
 logger = logging.getLogger(__name__)
 
 
-_BATTER_CACHE_COLUMNS = (
+# API에서 받아오는 필드 (league는 query 필터라서 반환 컬럼이 아님 → 여기 포함 안 함)
+_BATTER_API_COLUMNS = (
     "player_id", "name", "position", "team",
     "primary_number", "birth_date", "birth_city", "birth_country",
     "height", "weight", "current_age", "mlb_debut_date",
@@ -23,7 +24,7 @@ _BATTER_CACHE_COLUMNS = (
     "injury_status", "depth_order", "player_value",
 )
 
-_PITCHER_CACHE_COLUMNS = (
+_PITCHER_API_COLUMNS = (
     "player_id", "name", "position", "team",
     "w", "sv", "so", "era", "whip", "ip",
     "injury_status", "depth_order", "player_value",
@@ -32,6 +33,10 @@ _PITCHER_CACHE_COLUMNS = (
     "primary_number", "birth_date", "birth_city", "birth_country",
     "height", "weight", "current_age", "mlb_debut_date", "pitch_hand",
 )
+
+# DB 캐시 테이블에 저장하는 컬럼 = API 필드 + 우리가 태깅하는 league
+_BATTER_CACHE_COLUMNS = _BATTER_API_COLUMNS + ("league",)
+_PITCHER_CACHE_COLUMNS = _PITCHER_API_COLUMNS + ("league",)
 
 
 def _extract_rows(response: dict[str, Any], preferred_key: str) -> list[dict[str, Any]]:
@@ -81,7 +86,10 @@ def _sync_cache_table(
         )
         return
 
-    items = _extract_rows(al_resp, rows_key) + _extract_rows(nl_resp, rows_key)
+    items = (
+        [{**r, "league": "AL"} for r in _extract_rows(al_resp, rows_key)]
+        + [{**r, "league": "NL"} for r in _extract_rows(nl_resp, rows_key)]
+    )
     rows = [
         {col: item.get(col) for col in columns}
         for item in items
@@ -105,8 +113,8 @@ def _sync_cache_table(
 async def refresh_batter_cache() -> None:
     client = build_ppa_api_client()
     al_resp, nl_resp = await asyncio.gather(
-        client.batters_by_league("AL", columns=_BATTER_CACHE_COLUMNS),
-        client.batters_by_league("NL", columns=_BATTER_CACHE_COLUMNS),
+        client.batters_by_league("AL", columns=_BATTER_API_COLUMNS),
+        client.batters_by_league("NL", columns=_BATTER_API_COLUMNS),
         return_exceptions=True,
     )
     _sync_cache_table(
@@ -122,8 +130,8 @@ async def refresh_batter_cache() -> None:
 async def refresh_pitcher_cache() -> None:
     client = build_ppa_api_client()
     al_resp, nl_resp = await asyncio.gather(
-        client.pitchers_by_league("AL", columns=_PITCHER_CACHE_COLUMNS),
-        client.pitchers_by_league("NL", columns=_PITCHER_CACHE_COLUMNS),
+        client.pitchers_by_league("AL", columns=_PITCHER_API_COLUMNS),
+        client.pitchers_by_league("NL", columns=_PITCHER_API_COLUMNS),
         return_exceptions=True,
     )
     _sync_cache_table(
