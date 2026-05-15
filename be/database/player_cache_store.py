@@ -1,7 +1,11 @@
 # Batter and pitcher cache tables backed by the external PPA API.
 # refresh_player_cache() pulls AL+NL batters and pitchers and upserts local cache.
+# Each refresh also compares the new rows against the cached ones and records
+# notifications for injury_status / depth_order changes (consumed by the FE
+# notification polling endpoint).
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import bindparam, text
@@ -69,6 +73,90 @@ def _delete_missing_rows(conn, table_name: str, seen_ids: list[Any]) -> None:
     conn.execute(sql, {"ids": seen_ids})
 
 
+def _detect_and_record_deltas(
+    conn,
+    table_name: str,
+    new_rows: list[dict[str, Any]],
+    label: str,
+) -> None:
+    """Compare new rows against existing cache and INSERT notifications for
+    changes to injury_status or depth_order.
+
+    New player_ids (not yet in cache) emit no notification — that avoids a
+    1000-row flood on the very first refresh after a fresh DB.
+
+    Called inside the same engine.begin() transaction as the UPSERT so the
+    notification insert and cache update succeed or roll back together.
+    """
+    new_by_id = {
+        r["player_id"]: r
+        for r in new_rows
+        if r.get("player_id") is not None
+    }
+    if not new_by_id:
+        return
+
+    sql = text(f"""
+        SELECT player_id, name, injury_status, depth_order
+        FROM {table_name}
+        WHERE player_id IN :ids
+    """).bindparams(bindparam("ids", expanding=True))
+
+    old_rows = conn.execute(sql, {"ids": list(new_by_id.keys())}).fetchall()
+    old_by_id = {r._mapping["player_id"]: r._mapping for r in old_rows}
+
+    events: list[dict[str, Any]] = []
+    for pid, new in new_by_id.items():
+        old = old_by_id.get(pid)
+        if old is None:
+            # 첫 등장 — 알림 없음 (초기 로드 시 폭주 방지)
+            continue
+
+        old_injury = old["injury_status"] or ""
+        new_injury = new.get("injury_status") or ""
+        if old_injury != new_injury:
+            name = new.get("name") or "Player"
+            events.append({
+                "event_type": "INJURY",
+                "player_id": str(pid),
+                "player_name": new.get("name"),
+                "message": (
+                    f"{name}: injury status "
+                    f"{old_injury or 'Active'} → {new_injury or 'Active'}"
+                ),
+            })
+            continue  # injury가 depth보다 우선 — 한 선수당 사이클당 알림 1개로 제한
+
+        old_depth = old["depth_order"]
+        new_depth = new.get("depth_order")
+        if old_depth != new_depth:
+            name = new.get("name") or "Player"
+            events.append({
+                "event_type": "DEPTH",
+                "player_id": str(pid),
+                "player_name": new.get("name"),
+                "message": f"{name}: depth order {old_depth} → {new_depth}",
+            })
+
+    if not events:
+        return
+
+    now = datetime.now(timezone.utc)
+    for ev in events:
+        ev["created_at"] = now
+
+    conn.execute(
+        text("""
+            INSERT INTO notifications
+                (event_type, player_id, player_name, message, created_at)
+            VALUES
+                (:event_type, :player_id, :player_name, :message, :created_at)
+        """),
+        events,
+    )
+    logger.info(f"[{label}] {len(events)} delta notification(s) recorded")
+
+
 def _sync_cache_table(
     *,
     label: str,
@@ -101,9 +189,11 @@ def _sync_cache_table(
         return
 
     seen_ids = [r["player_id"] for r in rows]
-    # UPSERT와 stale-row DELETE를 단일 트랜잭션으로 묶음.
+    # delta 감지 → UPSERT → stale-row DELETE를 단일 트랜잭션으로 묶음.
     # 중간 실패 시 자동 ROLLBACK으로 어제 상태 유지.
+    # delta는 UPSERT 전에 — 그래야 기존 cache와 새 데이터를 비교 가능.
     with engine.begin() as conn:
+        _detect_and_record_deltas(conn, table_name, rows, label)
         _upsert_cache_rows(conn, table_name, columns, rows)
         _delete_missing_rows(conn, table_name, seen_ids)
 
