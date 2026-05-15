@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from pages.admin import router as admin_router
 from pages.ai import router as ai_router
 from auth import router as auth_router
 from pages.draft import router as draft_router
@@ -59,6 +60,7 @@ app.include_router(myteam_router)
 app.include_router(draft_router)
 app.include_router(ai_router)
 app.include_router(notifications_router)
+app.include_router(admin_router)
 
 
 # 메인 백엔드 서버의 상태 확인.
