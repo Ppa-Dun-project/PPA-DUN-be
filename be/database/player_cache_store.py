@@ -112,24 +112,32 @@ def _detect_and_record_deltas(
             # 첫 등장 — 알림 없음 (초기 로드 시 폭주 방지)
             continue
 
-        old_injury = old["injury_status"] or ""
-        new_injury = new.get("injury_status") or ""
-        if old_injury != new_injury:
+        # injury_status / depth_order가 NULL → 실제값 으로 전환되는 경우는
+        # 이 필드의 초기 인덱싱이지 실제 상태 변화가 아니므로 알림 안 만듦.
+        # (양쪽이 다 채워진 진짜 상태 변화만 알림 가치 있음)
+        old_injury = old["injury_status"]
+        new_injury = new.get("injury_status")
+        if (
+            old_injury is not None
+            and new_injury is not None
+            and old_injury != new_injury
+        ):
             name = new.get("name") or "Player"
             events.append({
                 "event_type": "INJURY",
                 "player_id": str(pid),
                 "player_name": new.get("name"),
-                "message": (
-                    f"{name}: injury status "
-                    f"{old_injury or 'Active'} → {new_injury or 'Active'}"
-                ),
+                "message": f"{name}: injury status {old_injury} → {new_injury}",
             })
             continue  # injury가 depth보다 우선 — 한 선수당 사이클당 알림 1개로 제한
 
         old_depth = old["depth_order"]
         new_depth = new.get("depth_order")
-        if old_depth != new_depth:
+        if (
+            old_depth is not None
+            and new_depth is not None
+            and old_depth != new_depth
+        ):
             name = new.get("name") or "Player"
             events.append({
                 "event_type": "DEPTH",

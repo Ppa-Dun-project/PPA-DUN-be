@@ -6,8 +6,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from database.notification_store import list_since
+from orm.session import engine
 from security import get_user_id
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,10 @@ class NotificationItem(BaseModel):
 
 class NotificationList(BaseModel):
     items: List[NotificationItem]
+    # Highest notification id currently in the table. FE uses this on the very
+    # first poll of a session to skip all historic events (so a new user
+    # doesn't get a flood of stale notifications).
+    latest_id: int
 
 
 @router.get("/recent", response_model=NotificationList)
@@ -36,9 +42,8 @@ def list_recent_notifications(
     limit: int = Query(50, ge=1, le=200),
     current_user_id: int = Depends(get_user_id),  # 인증만 필요 — user_id 자체는 안 씀
 ):
-    """Return notifications with id > since, oldest first.
-    FE remembers the highest id it has seen in localStorage and sends it back
-    on every poll. If since=0 (first load), the most recent N events are returned."""
+    """Return notifications with id > since (oldest first), plus the current
+    table-wide latest_id so the FE can anchor at 'now' on first load."""
     rows = list_since(last_id=since, limit=limit)
     items = [
         NotificationItem(
@@ -51,4 +56,10 @@ def list_recent_notifications(
         )
         for r in rows
     ]
-    return NotificationList(items=items)
+
+    with engine.connect() as conn:
+        max_id = conn.execute(
+            text("SELECT COALESCE(MAX(id), 0) FROM notifications")
+        ).scalar()
+
+    return NotificationList(items=items, latest_id=int(max_id or 0))
