@@ -30,14 +30,18 @@ load_dotenv()
 Base.metadata.create_all(bind=engine)
 
 
-# batter_caching/pitcher_caching 테이블을 매일 04:00 ET (America/New_York, DST 자동 반영)에 갱신.
-# 외부 API에서 AL+NL 타자/투수 목록을 받아 UPSERT.
+# batter_caching/pitcher_caching 테이블을 매 15분마다 갱신.
+# 외부 API(Player API)에서 AL+NL 타자/투수 목록을 받아 UPSERT하고,
+# 동시에 기존 cache와 비교해 injury_status / depth_order 변경된 선수에 대해
+# notifications 테이블에 알림 row를 추가한다 (FE polling이 픽업).
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         refresh_player_cache,
-        CronTrigger(hour=4, minute=0, timezone="America/New_York"),
+        CronTrigger(minute="*/15"),
+        id="refresh_player_cache",
+        name="Refresh player cache + emit delta notifications (every 15 min)",
     )
     scheduler.start()
     try:
