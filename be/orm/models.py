@@ -47,3 +47,24 @@ class DraftPlayerNote(Base):
     __table_args__ = (
         UniqueConstraint("session_id", "player_id", name="uq_session_player_note"),
     )
+
+
+class Notification(Base):
+    """Notification event displayed as a toast in the Draft Kit.
+    Inserts come from two sources:
+      1. delta detection during refresh_player_cache (real changes pulled from api)
+      2. webhook from api's POST /admin/player-event (fake admin push for demos)
+    Browser clients poll GET /api/notifications/recent?since=<id> every 15 seconds.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_type = Column(String(32), nullable=False)
+    player_id = Column(String(20), nullable=False, index=True)
+    player_name = Column(String(255), nullable=True)
+    message = Column(String(500), nullable=False)
+    created_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )

@@ -7,16 +7,18 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from pages.admin import router as admin_router
 from pages.ai import router as ai_router
 from auth import router as auth_router
 from pages.draft import router as draft_router
 from pages.home import router as home_router
 from pages.myteam import router as myteam_router
+from pages.notifications import router as notifications_router
 from pages.playerinfo import router as players_router
 
 from database.player_cache_store import refresh_player_cache
 from orm.session import engine, Base
-from orm.models import User, DraftPlayerNote  # noqa: F401 — import so SQLAlchemy registers the tables
+from orm.models import User, DraftPlayerNote, Notification  # noqa: F401 — import so SQLAlchemy registers the tables
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -28,14 +30,18 @@ load_dotenv()
 Base.metadata.create_all(bind=engine)
 
 
-# batter_caching/pitcher_caching 테이블을 매일 04:00 ET (America/New_York, DST 자동 반영)에 갱신.
-# 외부 API에서 AL+NL 타자/투수 목록을 받아 UPSERT.
+# batter_caching/pitcher_caching 테이블을 매 15분마다 갱신.
+# 외부 API(Player API)에서 AL+NL 타자/투수 목록을 받아 UPSERT하고,
+# 동시에 기존 cache와 비교해 injury_status / depth_order 변경된 선수에 대해
+# notifications 테이블에 알림 row를 추가한다 (FE polling이 픽업).
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         refresh_player_cache,
-        CronTrigger(hour=4, minute=0, timezone="America/New_York"),
+        CronTrigger(minute="*/15"),
+        id="refresh_player_cache",
+        name="Refresh player cache + emit delta notifications (every 15 min)",
     )
     scheduler.start()
     try:
@@ -57,6 +63,8 @@ app.include_router(home_router)
 app.include_router(myteam_router)
 app.include_router(draft_router)
 app.include_router(ai_router)
+app.include_router(notifications_router)
+app.include_router(admin_router)
 
 
 # 메인 백엔드 서버의 상태 확인.
