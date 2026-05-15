@@ -196,7 +196,7 @@ def load_draft_config(session_id: int) -> Optional[dict]:
 def load_draft_picks(session_id: int) -> List[dict]:
     sql = text("""
         SELECT player_id, drafted_by_team_id, slot_index,
-               slot_pos, bid, pick_type
+               slot_pos, bid, pick_type, kind
         FROM draft_picks
         WHERE session_id = :session_id
         ORDER BY id ASC
@@ -213,6 +213,7 @@ def load_draft_picks(session_id: int) -> List[dict]:
             "slotPos": r._mapping["slot_pos"],
             "bid": r._mapping["bid"],
             "type": r._mapping["pick_type"],
+            "kind": r._mapping["kind"] or "main",
         }
         for r in rows
     ]
@@ -224,7 +225,7 @@ def replace_session_picks(
     picks: List[dict],
 ) -> None:
     """세션의 모든 picks를 통째로 교체 (DELETE 후 bulk INSERT). 트랜잭션으로 원자적 처리.
-    각 pick dict 키: player_id, drafted_by_team_id, slot_index, slot_pos, bid, pick_type."""
+    각 pick dict 키: player_id, drafted_by_team_id, slot_index, slot_pos, bid, pick_type, kind."""
     now = datetime.utcnow()
     with engine.begin() as conn:
         conn.execute(
@@ -236,10 +237,10 @@ def replace_session_picks(
                 text("""
                     INSERT INTO draft_picks
                         (session_id, user_id, player_id, drafted_by_team_id, slot_index,
-                         slot_pos, bid, pick_type, created_at)
+                         slot_pos, bid, pick_type, kind, created_at)
                     VALUES
                         (:session_id, :user_id, :player_id, :drafted_by_team_id, :slot_index,
-                         :slot_pos, :bid, :pick_type, :now)
+                         :slot_pos, :bid, :pick_type, :kind, :now)
                 """),
                 [
                     {
@@ -251,6 +252,7 @@ def replace_session_picks(
                         "slot_pos": p["slot_pos"],
                         "bid": p["bid"],
                         "pick_type": p["pick_type"],
+                        "kind": p.get("kind") or "main",
                         "now": now,
                     }
                     for p in picks

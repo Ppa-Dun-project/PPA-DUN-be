@@ -24,6 +24,8 @@ router = APIRouter(prefix="/api/draft", tags=["draft"])
 
 DraftPosition = Literal["C", "1B", "2B", "3B", "SS", "OF", "UTIL", "SP", "RP", "BENCH"]
 DraftPickType = Literal["mine", "taken"]
+# 마이너/택시는 메인 드래프트 전/후로 따로 등록되며 bid·포지션 자격 검사가 없음.
+DraftPickKind = Literal["main", "minor", "taxi"]
 PlayerType = Literal["batter", "pitcher", "two_way"]
 
 # 선수별 드래프트 관련 정보 + 간단 개인 스탯
@@ -80,9 +82,12 @@ class DraftPlayerValueList(BaseModel):
 class PlayerDraftStatus(BaseModel):
     playerId: str
     draftedByTeamId: str
-    slotPos: DraftPosition
+    # 마이너/택시는 포지션 슬롯이 없어 None.
+    slotPos: Optional[DraftPosition] = None
     bid: Optional[int] = None
     type: DraftPickType
+    # 메인/마이너/택시 보드 구분. 옛 데이터 호환을 위해 default "main".
+    kind: DraftPickKind = "main"
 
 
 # 선수의 픽 상태 (어떤 팀이 픽했는지, 어떤 포지션에 배치됐는지, 가격은 얼마인지 등)
@@ -228,6 +233,7 @@ def normalize_pick_team_ids(picks: List[PlayerDraftStatusIndex]) -> List[PlayerD
             slotPos=p.slotPos,
             bid=p.bid,
             type=p.type,
+            kind=p.kind,
         )
         for p in picks
     ]
@@ -247,9 +253,10 @@ def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
             playerId=r["playerId"],               # 선수 ID
             draftedByTeamId=normalize_draft_team_id(r["draftedByTeamId"]), # 해당 선수를 뽑은 팀 ID
             slotIndex=r["slotIndex"],             # 슬롯 인덱스
-            slotPos=r["slotPos"],                 # 배정된 포지션
+            slotPos=r["slotPos"],                 # 배정된 포지션 (마이너/택시는 None)
             bid=r["bid"],                         # 입찰되었던 가격
             type=r["type"],                       # 픽 유형
+            kind=r.get("kind") or "main",         # 보드 구분 (옛 행은 main 폴백)
         )
         for r in rows
     ]
@@ -313,6 +320,7 @@ def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
             "slot_pos": p.slotPos,
             "bid": p.bid,
             "pick_type": p.type,
+            "kind": p.kind,
         }
         for p in picks
     ]
@@ -615,8 +623,9 @@ async def get_draft_player_values(
     with engine.connect() as conn:
         cache_rows = conn.execute(sql).fetchall()
 
-    # bid 계산용 컨텍스트 구성
-    my_picks = [p for p in picks if p.draftedByTeamId == "team-0"]
+    # bid 계산은 메인 드래프트에만 의미가 있음 — 마이너/택시는 무료라서 budget/roster 카운트에서 제외.
+    main_picks = [p for p in picks if (p.kind or "main") == "main"]
+    my_picks = [p for p in main_picks if p.draftedByTeamId == "team-0"]
     my_spent = sum(p.bid or 0 for p in my_picks)
     league_context = {
         "league_size": config.opponentsCount + 1,
@@ -626,8 +635,8 @@ async def get_draft_player_values(
     draft_context = {
         "my_remaining_budget": max(0, config.budget - my_spent),
         "my_remaining_roster_spots": max(0, config.rosterPlayers - len(my_picks)),
-        "drafted_players_count": len(picks),
-        "my_positions_filled": [p.slotPos for p in my_picks],
+        "drafted_players_count": len(main_picks),
+        "my_positions_filled": [p.slotPos for p in my_picks if p.slotPos],
     }
 
     # 각 선수에 대해 bid 병렬 호출. 세마포어로 동시성 상한을 둬서 in-flight 요청 폭주 방지.
