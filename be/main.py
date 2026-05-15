@@ -12,6 +12,7 @@ from auth import router as auth_router
 from pages.draft import router as draft_router
 from pages.home import router as home_router
 from pages.myteam import router as myteam_router
+from pages.notifications import router as notifications_router
 from pages.playerinfo import router as players_router
 
 from database.player_cache_store import refresh_player_cache
@@ -57,6 +58,7 @@ app.include_router(home_router)
 app.include_router(myteam_router)
 app.include_router(draft_router)
 app.include_router(ai_router)
+app.include_router(notifications_router)
 
 
 # 메인 백엔드 서버의 상태 확인.
