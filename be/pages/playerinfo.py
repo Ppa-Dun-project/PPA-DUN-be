@@ -74,6 +74,8 @@ class PlayerOut(BaseModel):
     positions: list[str]
     valueScore: float
     headshotUrl: Optional[str] = None
+    nationality: Optional[str] = None
+    depth_order: Optional[int] = None
     batterStats: Optional[BatterStats] = None
     pitcherStats: Optional[PitcherStats] = None
 
@@ -105,6 +107,7 @@ def build_batter_detail(player_id: int) -> PlayerOut:
     sql = text("""
         SELECT player_id, name, position, team,
                current_age, height, weight, bat_side, pitch_hand,
+               birth_country,
                ab, r, h, hr, rbi, bb, k, sb, cs,
                avg, obp, slg, player_value, depth_order
         FROM batter_caching
@@ -135,6 +138,8 @@ def build_batter_detail(player_id: int) -> PlayerOut:
         positions=[m["position"] or "DH"],
         valueScore=float_value(m["player_value"]),
         headshotUrl=headshot_url(m["player_id"]),
+        nationality=m["birth_country"] or None,
+        depth_order=m["depth_order"],
         batterStats=BatterStats(
             avg=float_value(m["avg"]),
             pa=ab + bb,
@@ -150,7 +155,6 @@ def build_batter_detail(player_id: int) -> PlayerOut:
             cs=int_value(m["cs"]),
             obp=obp,
             slg=slg,
-            depth_order=int_value(m["depth_order"])
         ),
     )
 
@@ -159,6 +163,7 @@ def build_pitcher_detail(player_id: int) -> PlayerOut:
     sql = text("""
         SELECT player_id, name, position, team,
                current_age, height, weight, pitch_hand, player_value,
+               birth_country,
                w, sv, so, era, whip, ip,
                l, g, gs, war, fip, h, r, er, hr, bb, hbp, bf,
                era_plus, h9, hr9, bb9, so9, so_bb, depth_order
@@ -185,6 +190,8 @@ def build_pitcher_detail(player_id: int) -> PlayerOut:
         positions=[m["position"] or "P"],
         valueScore=float_value(m["player_value"]),
         headshotUrl=headshot_url(m["player_id"]),
+        nationality=m["birth_country"] or None,
+        depth_order=m["depth_order"],
         pitcherStats=PitcherStats(
             w=int_value(m["w"]),
             sv=int_value(m["sv"]),
@@ -210,7 +217,6 @@ def build_pitcher_detail(player_id: int) -> PlayerOut:
             bb9=float_value(m["bb9"], 2),
             so9=float_value(m["so9"], 2),
             so_bb=float_value(m["so_bb"], 2),
-            depth_order=int_value(m["depth_order"]),
         ),
     )
 
