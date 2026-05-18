@@ -1,8 +1,6 @@
-# Unit test for normalized_config — the central pure function used by session
-# create / update / get endpoints in pages/draft.py. It clamps user-provided
-# numeric inputs, builds the team list (my team + opponents with fallback names),
-# and assembles the DraftConfig pydantic model.
-#
+# Unit test for normalized_config
+# Basically tests clamping feature works properly.
+
 # Why this function: it runs on every session CRUD call, has multiple branches
 # (clamping ranges, name fallbacks, opponent count truncation), and is a pure
 # function with no DB / network dependency — ideal for a fast unit test.
