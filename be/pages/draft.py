@@ -558,13 +558,18 @@ def update_session_note(
 @router.get("/players", response_model=PlayerSummaryList)
 def get_draft_players(league: Optional[str] = None):
     where_clause = "WHERE league = :league" if league else ""
+    # `double` is a MySQL reserved keyword — must be backtick-quoted. We also
+    # quote `single` and `triple` for symmetry/safety even though they parse.
     batter_sql = sa_text(f"""
-        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab, r, h, single, double, triple, bb, k, cs, obp, slg
+        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab, r, h,
+               `single`, `double`, `triple`, bb, k, cs, obp, slg
         FROM batter_caching
         {where_clause}
     """)
     pitcher_sql = sa_text(f"""
-        SELECT player_id, name, position, team, w, sv, so, era, ip, l, whip, g, gs, war, fip, h, r, er, hr, bb, hbp, bf, era_plus, h9, hr9, bb9, so9, so_bb
+        SELECT player_id, name, position, team, w, sv, so, era, ip, l, whip,
+               g, gs, war, fip, h, r, er, hr, bb, hbp, bf, era_plus,
+               h9, hr9, bb9, so9, so_bb
         FROM pitcher_caching
         {where_clause}
     """)
