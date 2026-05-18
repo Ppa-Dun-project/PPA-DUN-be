@@ -1,26 +1,61 @@
 ﻿# FastAPI application entry point.
 # Registers all page routers (draft, home, myteam, players, ppa) and
 # configures CORS middleware so the frontend dev server can reach the backend.
+import os
+from contextlib import asynccontextmanager
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from pages.admin import router as admin_router
+from pages.ai import router as ai_router
 from auth import router as auth_router
-from draft import router as draft_router
-from home import router as home_router
-from myteam import router as myteam_router
-from playerinfo import router as players_router
+from pages.draft import router as draft_router
+from pages.home import router as home_router
+from pages.myteam import router as myteam_router
+from pages.notifications import router as notifications_router
+from pages.playerinfo import router as players_router
 
-from core.config import settings
-from db.session import engine, Base
-from db.models import User  # noqa: F401 — import so SQLAlchemy registers the table
+from database.player_cache_store import refresh_player_cache
+from orm.session import engine, Base
+from orm.models import User, DraftPlayerNote, Notification  # noqa: F401 — import so SQLAlchemy registers the tables
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Auto-create all DB tables on startup (if they don't exist yet)
+load_dotenv()
+
+# Auto-create ORM-managed DB tables on startup (if they don't exist yet)
 Base.metadata.create_all(bind=engine)
+
+
+# batter_caching/pitcher_caching 테이블을 매 30분마다 갱신.
+# api가 :00 / :30 mark에 외부 ESPN fetch하므로 be는 :02 / :32에 끌어와
+# api 업데이트 완료 후 새 데이터를 본다.
+# 외부 API(Player API)에서 AL+NL 타자/투수 목록을 받아 UPSERT하고,
+# 동시에 기존 cache와 비교해 injury_status / depth_order 변경된 선수에 대해
+# notifications 테이블에 알림 row를 추가한다 (FE polling이 픽업).
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        refresh_player_cache,
+        CronTrigger(minute="2,32"),
+        id="refresh_player_cache",
+        name="Refresh player cache + emit delta notifications (every 30 min)",
+    )
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+
 
 # 백엔드 서버를 uvicorn main:app으로 실행하면 시작되는 것.
 # app이 요청을 받아서 알맞은 함수로 연결해줌
 # app은 모든 엔드포인트, 라우터, 미들웨어 (CORS)를 한번에 관리함
-app = FastAPI(title="PPA-Dun API")
+app = FastAPI(title="PPA-Dun API", lifespan=lifespan)
 
 # 각 파일에서 정의한 엔드포인트들을 하나의 앱에 합침
 # app - 서버 자체 / router - 각 파일의 엔드포인트 묶음
@@ -29,6 +64,9 @@ app.include_router(players_router)
 app.include_router(home_router)
 app.include_router(myteam_router)
 app.include_router(draft_router)
+app.include_router(ai_router)
+app.include_router(notifications_router)
+app.include_router(admin_router)
 
 
 # 메인 백엔드 서버의 상태 확인.
@@ -51,7 +89,7 @@ def health():
 app.add_middleware(
     CORSMiddleware,
     # 어떤 출처에서 오는 요청을 허용할지
-    allow_origins=_parse_cors_origins(settings.CORS_ORIGINS),
+    allow_origins=_parse_cors_origins(os.getenv("CORS_ORIGINS", "")),
 
     # 쿠키/인증 정보 포함 허용 여부
     allow_credentials=True,
