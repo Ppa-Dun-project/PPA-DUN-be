@@ -20,22 +20,18 @@ logger = logging.getLogger(__name__)
 _BATTER_API_COLUMNS = (
     "player_id", "name", "position", "team",
     "primary_number", "birth_date", "birth_city", "birth_country",
-    "height", "weight", "current_age", "mlb_debut_date",
-    "bat_side", "pitch_hand",
-    "ab", "r", "h", "single", "double", "triple",
-    "hr", "rbi", "bb", "k", "sb", "cs",
-    "avg", "obp", "slg",
+    "height", "weight", "current_age", "mlb_debut_date","bat_side", "pitch_hand",
+    "ab", "r", "h", "single", "double", "triple", "hr", "rbi", "bb", "k", "sb", "cs","avg", "obp", "slg",
     "injury_status", "depth_order", "player_value",
 )
 
 _PITCHER_API_COLUMNS = (
     "player_id", "name", "position", "team",
-    "w", "sv", "so", "era", "whip", "ip",
-    "injury_status", "depth_order", "player_value",
-    "l", "g", "gs", "war", "fip", "h", "r", "er", "hr", "bb", "hbp", "bf",
-    "era_plus", "h9", "hr9", "bb9", "so9", "so_bb",
     "primary_number", "birth_date", "birth_city", "birth_country",
     "height", "weight", "current_age", "mlb_debut_date", "pitch_hand",
+    "w", "sv", "so", "era", "whip", "ip", "l", "g", "gs", "war", "fip", "h", "r", "er", 
+    "hr", "bb", "hbp", "bf", "era_plus", "h9", "hr9", "bb9", "so9", "so_bb",
+    "injury_status", "depth_order", "player_value",
 )
 
 # DB 캐시 테이블에 저장하는 컬럼 = API 필드 + 우리가 태깅하는 league

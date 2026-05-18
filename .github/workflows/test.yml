@@ -1,0 +1,39 @@
+name: Test
+
+# Runs the BE test suite (unit + integration). Both kinds are mock-based and
+# need no real DB or network, so a single fast job covers everything.
+#
+# Triggers:
+#   - push to develop / main — feedback after merge (and required because
+#     deploy workflows depend on this one).
+#   - pull_request targeting develop / main — gates the merge button when
+#     branch protection is enabled in GitHub Settings.
+#   - workflow_call — exposes this workflow as a reusable building block so
+#     deploy-dev.yml / deploy-prod.yml can require a green test run before
+#     building and shipping an image.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest be/testing/ -v

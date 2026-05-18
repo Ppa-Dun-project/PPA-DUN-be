@@ -132,17 +132,18 @@ def save_draft_config(
     my_team_name: str,
     opp_team_names: List[str],
     opponents_count: int,
+    target_season: Optional[int] = None,
 ) -> None:
     """Saves draft config for a session (INSERT or UPDATE on duplicate session_id)."""
     now = datetime.utcnow()
     sql = text("""
         INSERT INTO draft_config
             (session_id, user_id, league_type, budget, roster_players,
-             my_team_name, opp_team_names, opponents_count,
+             my_team_name, opp_team_names, opponents_count, target_season,
              created_at, updated_at)
         VALUES
             (:session_id, :user_id, :league_type, :budget, :roster_players,
-             :my_team_name, :opp_team_names, :opponents_count,
+             :my_team_name, :opp_team_names, :opponents_count, :target_season,
              :now, :now)
         ON DUPLICATE KEY UPDATE
             league_type = VALUES(league_type),
@@ -151,6 +152,7 @@ def save_draft_config(
             my_team_name = VALUES(my_team_name),
             opp_team_names = VALUES(opp_team_names),
             opponents_count = VALUES(opponents_count),
+            target_season = VALUES(target_season),
             updated_at = VALUES(updated_at)
     """)
     with engine.connect() as conn:
@@ -163,6 +165,7 @@ def save_draft_config(
             "my_team_name": my_team_name,
             "opp_team_names": json.dumps(opp_team_names),
             "opponents_count": opponents_count,
+            "target_season": target_season,
             "now": now,
         })
         conn.commit()
@@ -188,6 +191,7 @@ def load_draft_config(session_id: int) -> Optional[dict]:
         "my_team_name": r["my_team_name"],
         "opp_team_names": opp_names,
         "opponents_count": r["opponents_count"],
+        "target_season": r["target_season"],
     }
 
 
@@ -195,8 +199,9 @@ def load_draft_config(session_id: int) -> Optional[dict]:
 # 특정 세션의 모든 팀의 모든 픽을 가져옴 (내거 상대거 전부 다)
 def load_draft_picks(session_id: int) -> List[dict]:
     sql = text("""
-        SELECT player_id, drafted_by_team_id, slot_index,
-               slot_pos, bid, pick_type, kind
+        SELECT player_id, drafted_by_team_id, brought_up_by_team_id, slot_index,
+               slot_pos, bid, pick_type, kind,
+               contract_code, signed_season
         FROM draft_picks
         WHERE session_id = :session_id
         ORDER BY id ASC
@@ -209,11 +214,14 @@ def load_draft_picks(session_id: int) -> List[dict]:
         {
             "playerId": r._mapping["player_id"],
             "draftedByTeamId": r._mapping["drafted_by_team_id"],
+            "broughtUpByTeamId": r._mapping["brought_up_by_team_id"],
             "slotIndex": r._mapping["slot_index"],
             "slotPos": r._mapping["slot_pos"],
             "bid": r._mapping["bid"],
             "type": r._mapping["pick_type"],
             "kind": r._mapping["kind"] or "main",
+            "contractCode": r._mapping["contract_code"],
+            "signedSeason": r._mapping["signed_season"],
         }
         for r in rows
     ]
@@ -225,7 +233,8 @@ def replace_session_picks(
     picks: List[dict],
 ) -> None:
     """세션의 모든 picks를 통째로 교체 (DELETE 후 bulk INSERT). 트랜잭션으로 원자적 처리.
-    각 pick dict 키: player_id, drafted_by_team_id, slot_index, slot_pos, bid, pick_type, kind."""
+    각 pick dict 키: player_id, drafted_by_team_id, slot_index, slot_pos, bid, pick_type,
+    kind, contract_code, signed_season."""
     now = datetime.utcnow()
     with engine.begin() as conn:
         conn.execute(
@@ -236,11 +245,15 @@ def replace_session_picks(
             conn.execute(
                 text("""
                     INSERT INTO draft_picks
-                        (session_id, user_id, player_id, drafted_by_team_id, slot_index,
-                         slot_pos, bid, pick_type, kind, created_at)
+                        (session_id, user_id, player_id, drafted_by_team_id,
+                         brought_up_by_team_id, slot_index,
+                         slot_pos, bid, pick_type, kind, contract_code, signed_season,
+                         created_at)
                     VALUES
-                        (:session_id, :user_id, :player_id, :drafted_by_team_id, :slot_index,
-                         :slot_pos, :bid, :pick_type, :kind, :now)
+                        (:session_id, :user_id, :player_id, :drafted_by_team_id,
+                         :brought_up_by_team_id, :slot_index,
+                         :slot_pos, :bid, :pick_type, :kind, :contract_code, :signed_season,
+                         :now)
                 """),
                 [
                     {
@@ -248,11 +261,14 @@ def replace_session_picks(
                         "user_id": user_id,
                         "player_id": p["player_id"],
                         "drafted_by_team_id": p["drafted_by_team_id"],
+                        "brought_up_by_team_id": p.get("brought_up_by_team_id"),
                         "slot_index": p["slot_index"],
                         "slot_pos": p["slot_pos"],
                         "bid": p["bid"],
                         "pick_type": p["pick_type"],
                         "kind": p.get("kind") or "main",
+                        "contract_code": p.get("contract_code"),
+                        "signed_season": p.get("signed_season"),
                         "now": now,
                     }
                     for p in picks

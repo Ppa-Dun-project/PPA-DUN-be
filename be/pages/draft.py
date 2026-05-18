@@ -3,12 +3,12 @@
 # slot assignment, and bootstrap.
 # Player metadata and value come from the batter_caching table; recommended bids
 # are computed in real time via the external API's POST /player/bid/id.
-import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from contract_rollover import ContractCode
 from database.draft_store import load_draft_config
 from orm.session import engine
 from ppa_api.ppa_client import ApiError, build_ppa_api_client
@@ -36,17 +36,43 @@ class PlayerSummary(BaseModel):
     playerType: PlayerType
     positions: List[DraftPosition]
     team: str
-    avg: Optional[float] = None
+    # ── Batter stats ─────────────────────────────────────────────────
+    ab: Optional[int] = None
+    r: Optional[int] = None
+    h: Optional[int] = None
+    single: Optional[int] = None
+    double: Optional[int] = None
+    triple: Optional[int] = None
     hr: Optional[int] = None
     rbi: Optional[int] = None
+    bb: Optional[int] = None
+    k: Optional[int] = None
     sb: Optional[int] = None
-    ab: Optional[int] = None
+    cs: Optional[int] = None
+    avg: Optional[float] = None
+    obp: Optional[float] = None
+    slg: Optional[float] = None
+    # ── Pitcher stats (h/r/hr/bb shared with batter — context-dependent) ──
     w: Optional[int] = None
+    l: Optional[int] = None
     sv: Optional[int] = None
     so: Optional[int] = None
     era: Optional[float] = None
     whip: Optional[float] = None
     ip: Optional[float] = None
+    g: Optional[int] = None
+    gs: Optional[int] = None
+    war: Optional[float] = None
+    fip: Optional[float] = None
+    er: Optional[int] = None
+    hbp: Optional[int] = None
+    bf: Optional[int] = None
+    era_plus: Optional[int] = None
+    h9: Optional[float] = None
+    hr9: Optional[float] = None
+    bb9: Optional[float] = None
+    so9: Optional[float] = None
+    so_bb: Optional[float] = None
 
 # 드래프트 세션 설정에 관한 값들
 class DraftConfig(BaseModel):
@@ -56,6 +82,8 @@ class DraftConfig(BaseModel):
     myTeamName: str
     opponentsCount: int
     oppTeamNames: List[str]
+    # keeper 롤오버의 기준 시즌. 옛 세션에는 없어 None일 수 있음.
+    targetSeason: Optional[int] = None
 
 # 사용자와 상대의 각 생성된 정보
 class DraftTeam(BaseModel):
@@ -71,23 +99,34 @@ class PlayerSummaryList(BaseModel):
 class DraftPlayerValue(BaseModel):
     playerId: str
     ppaValue: Optional[float] = None
-    recommendedBid: Optional[int] = None
 
 
 class DraftPlayerValueList(BaseModel):
     items: List[DraftPlayerValue]
 
 
+# Add 모달이 열릴 때 1명에 대해서만 외부 API로 bid를 계산해 돌려준다.
+class DraftPlayerBid(BaseModel):
+    playerId: str
+    recommendedBid: Optional[int] = None
+
+
 # 드래프트 된 야구선수의 세부 현황 및 조건
 class PlayerDraftStatus(BaseModel):
     playerId: str
     draftedByTeamId: str
+    # 옥션에서 선수를 지명(올린) 팀. 옛 데이터엔 없어 nullable.
+    broughtUpByTeamId: Optional[str] = None
     # 마이너/택시는 포지션 슬롯이 없어 None.
     slotPos: Optional[DraftPosition] = None
     bid: Optional[int] = None
     type: DraftPickType
     # 메인/마이너/택시 보드 구분. 옛 데이터 호환을 위해 default "main".
     kind: DraftPickKind = "main"
+    # Keeper 계약 코드 (영입 당시 원본). 내 픽 이외(상대팀/마이너/택시)는 None.
+    contractCode: Optional[ContractCode] = None
+    # 이 픽이 영입된 세션의 target_season. rollover 계산에 사용.
+    signedSeason: Optional[int] = None
 
 
 # 선수의 픽 상태 (어떤 팀이 픽했는지, 어떤 포지션에 배치됐는지, 가격은 얼마인지 등)
@@ -127,8 +166,10 @@ class UpdateSessionPayload(BaseModel):
     picks: List[PlayerDraftStatusIndex]
 
 
-# /players/values는 unsaved 드래프트도 추천가를 받아야 하므로 sessionId가 아닌 body로 직접 전달.
-class PlayerValuesPayload(BaseModel):
+# /players/bid는 unsaved 드래프트도 추천가를 받아야 하므로 sessionId가 아닌 body로 직접 전달.
+# 선수 1명에 대해서만 호출되므로 playerId 도 같이 받는다.
+class PlayerBidPayload(BaseModel):
+    playerId: str
     config: DraftConfig
     picks: List[PlayerDraftStatusIndex]
 
@@ -229,11 +270,14 @@ def normalize_pick_team_ids(picks: List[PlayerDraftStatusIndex]) -> List[PlayerD
         PlayerDraftStatusIndex(
             playerId=p.playerId,
             draftedByTeamId=normalize_draft_team_id(p.draftedByTeamId),
+            broughtUpByTeamId=p.broughtUpByTeamId,
             slotIndex=p.slotIndex,
             slotPos=p.slotPos,
             bid=p.bid,
             type=p.type,
             kind=p.kind,
+            contractCode=p.contractCode,
+            signedSeason=p.signedSeason,
         )
         for p in picks
     ]
@@ -252,11 +296,14 @@ def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
         PlayerDraftStatusIndex(
             playerId=r["playerId"],               # 선수 ID
             draftedByTeamId=normalize_draft_team_id(r["draftedByTeamId"]), # 해당 선수를 뽑은 팀 ID
+            broughtUpByTeamId=r.get("broughtUpByTeamId"),  # 옥션에서 지명한 팀 (옛 행은 None)
             slotIndex=r["slotIndex"],             # 슬롯 인덱스
             slotPos=r["slotPos"],                 # 배정된 포지션 (마이너/택시는 None)
             bid=r["bid"],                         # 입찰되었던 가격
             type=r["type"],                       # 픽 유형
             kind=r.get("kind") or "main",         # 보드 구분 (옛 행은 main 폴백)
+            contractCode=r.get("contractCode"),   # keeper 계약 코드 (영입 당시 원본)
+            signedSeason=r.get("signedSeason"),   # 영입 세션의 target_season
         )
         for r in rows
     ]
@@ -270,6 +317,7 @@ def normalized_config(
     my_team_name: str,
     opp_team_names: List[str],
     opponents_count: int,
+    target_season: Optional[int] = None,
 ) -> Tuple[DraftConfig, List[DraftTeam]]:
 
     # 사용자가 최대, 최소 범위를 벗어날 경우 normalization
@@ -295,6 +343,7 @@ def normalized_config(
         myTeamName=teams[0].name,
         opponentsCount=normalized_opponents,
         oppTeamNames=opps,
+        targetSeason=target_season,
     )
 
     # 드래프트 설정 정보 + 전체 팀 정보 반환
@@ -316,11 +365,14 @@ def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
         {
             "player_id": p.playerId,
             "drafted_by_team_id": normalize_draft_team_id(p.draftedByTeamId),
+            "brought_up_by_team_id": p.broughtUpByTeamId,
             "slot_index": p.slotIndex,
             "slot_pos": p.slotPos,
             "bid": p.bid,
             "pick_type": p.type,
             "kind": p.kind,
+            "contract_code": p.contractCode,
+            "signed_season": p.signedSeason,
         }
         for p in picks
     ]
@@ -362,6 +414,7 @@ def create_user_session(
         my_team_name=payload.config.myTeamName,
         opp_team_names=payload.config.oppTeamNames,
         opponents_count=payload.config.opponentsCount,
+        target_season=payload.config.targetSeason,
     )
 
     name = payload.name.strip() or "Untitled Draft"
@@ -380,6 +433,7 @@ def create_user_session(
         my_team_name=config.myTeamName,
         opp_team_names=config.oppTeamNames,
         opponents_count=config.opponentsCount,
+        target_season=config.targetSeason,
     )
 
     picks = normalize_pick_team_ids(payload.picks)
@@ -415,6 +469,7 @@ def get_session_detail(
         my_team_name=config_row["my_team_name"],
         opp_team_names=config_row["opp_team_names"] or [],
         opponents_count=config_row["opponents_count"],
+        target_season=config_row.get("target_season"),
     )
 
     picks = get_session_picks(session_id)
@@ -452,6 +507,7 @@ def update_user_session(
         my_team_name=config_row["my_team_name"],
         opp_team_names=config_row["opp_team_names"] or [],
         opponents_count=config_row["opponents_count"],
+        target_season=config_row.get("target_season"),
     )
     return SessionDetail(
         id=session_id,
@@ -528,13 +584,18 @@ def update_session_note(
 @router.get("/players", response_model=PlayerSummaryList)
 def get_draft_players(league: Optional[str] = None):
     where_clause = "WHERE league = :league" if league else ""
+    # `double` is a MySQL reserved keyword — must be backtick-quoted. We also
+    # quote `single` and `triple` for symmetry/safety even though they parse.
     batter_sql = sa_text(f"""
-        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab
+        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab, r, h,
+               `single`, `double`, `triple`, bb, k, cs, obp, slg
         FROM batter_caching
         {where_clause}
     """)
     pitcher_sql = sa_text(f"""
-        SELECT player_id, name, position, team, w, sv, so, era, whip, ip
+        SELECT player_id, name, position, team, w, sv, so, era, ip, l, whip,
+               g, gs, war, fip, h, r, er, hr, bb, hbp, bf, era_plus,
+               h9, hr9, bb9, so9, so_bb
         FROM pitcher_caching
         {where_clause}
     """)
@@ -556,11 +617,21 @@ def get_draft_players(league: Optional[str] = None):
             playerType="batter",
             positions=[draft_pos],
             team=m["team"] or "",
-            avg=nullable_float(m["avg"]),
+            ab=nullable_int(m["ab"]),
+            r=nullable_int(m["r"]),
+            h=nullable_int(m["h"]),
+            single=nullable_int(m["single"]),
+            double=nullable_int(m["double"]),
+            triple=nullable_int(m["triple"]),
             hr=nullable_int(m["hr"]),
             rbi=nullable_int(m["rbi"]),
+            bb=nullable_int(m["bb"]),
+            k=nullable_int(m["k"]),
             sb=nullable_int(m["sb"]),
-            ab=nullable_int(m["ab"]),
+            cs=nullable_int(m["cs"]),
+            avg=nullable_float(m["avg"]),
+            obp=nullable_float(m["obp"], 3),
+            slg=nullable_float(m["slg"], 3),
         )
 
     for row in pitcher_rows:
@@ -569,15 +640,32 @@ def get_draft_players(league: Optional[str] = None):
         draft_pos = draft_position_for(m["position"], "SP")
         existing = items_by_id.get(player_id)
         if existing is not None:
+            # two_way: batter row 가 이미 차있고 pitcher row 도 있는 경우.
+            # 공유 필드 (h/r/hr/bb) 는 batter 의미를 보존해야 하므로 안 덮음.
+            # pitcher-only 필드들만 채운다.
             existing.playerType = "two_way"
             if draft_pos not in existing.positions:
                 existing.positions.append(draft_pos)
             existing.w = nullable_int(m["w"])
+            existing.l = nullable_int(m["l"])
             existing.sv = nullable_int(m["sv"])
             existing.so = nullable_int(m["so"])
             existing.era = nullable_float(m["era"], 2)
             existing.whip = nullable_float(m["whip"], 3)
             existing.ip = nullable_float(m["ip"], 1)
+            existing.g = nullable_int(m["g"])
+            existing.gs = nullable_int(m["gs"])
+            existing.war = nullable_float(m["war"], 2)
+            existing.fip = nullable_float(m["fip"], 2)
+            existing.er = nullable_int(m["er"])
+            existing.hbp = nullable_int(m["hbp"])
+            existing.bf = nullable_int(m["bf"])
+            existing.era_plus = nullable_int(m["era_plus"])
+            existing.h9 = nullable_float(m["h9"], 2)
+            existing.hr9 = nullable_float(m["hr9"], 2)
+            existing.bb9 = nullable_float(m["bb9"], 2)
+            existing.so9 = nullable_float(m["so9"], 2)
+            existing.so_bb = nullable_float(m["so_bb"], 2)
             continue
 
         items_by_id[player_id] = PlayerSummary(
@@ -586,12 +674,32 @@ def get_draft_players(league: Optional[str] = None):
             playerType="pitcher",
             positions=[draft_pos],
             team=m["team"] or "",
+            # 공유 필드 — pitcher 의미 (피안타/실점/피홈런/볼넷허용)
+            h=nullable_int(m["h"]),
+            r=nullable_int(m["r"]),
+            hr=nullable_int(m["hr"]),
+            bb=nullable_int(m["bb"]),
+            # pitcher-only
             w=nullable_int(m["w"]),
+            l=nullable_int(m["l"]),
             sv=nullable_int(m["sv"]),
             so=nullable_int(m["so"]),
             era=nullable_float(m["era"], 2),
             whip=nullable_float(m["whip"], 3),
             ip=nullable_float(m["ip"], 1),
+            g=nullable_int(m["g"]),
+            gs=nullable_int(m["gs"]),
+            war=nullable_float(m["war"], 2),
+            fip=nullable_float(m["fip"], 2),
+            er=nullable_int(m["er"]),
+            hbp=nullable_int(m["hbp"]),
+            bf=nullable_int(m["bf"]),
+            era_plus=nullable_int(m["era_plus"]),
+            h9=nullable_float(m["h9"], 2),
+            hr9=nullable_float(m["hr9"], 2),
+            bb9=nullable_float(m["bb9"], 2),
+            so9=nullable_float(m["so9"], 2),
+            so_bb=nullable_float(m["so_bb"], 2),
         )
 
     return PlayerSummaryList(items=list(items_by_id.values()))
@@ -599,17 +707,14 @@ def get_draft_players(league: Optional[str] = None):
 
 
 
-########################## 선수별 PPA 가치 + 추천 입찰가 ##########################
-# unsaved 드래프트도 추천가를 받을 수 있도록 sessionId 대신 body로 config + picks를 받음.
+########################## 선수별 PPA 가치 (DB 캐시) ##########################
+# 전체 선수의 ppaValue 를 한 번에 반환. DB 캐시만 읽으므로 즉시 응답.
+# bid 는 분리되어 /players/bid 가 1명씩 처리한다.
 # 드래프트 세션은 로그인된 사용자만 사용 가능하므로 Depends.
-@router.post("/players/values", response_model=DraftPlayerValueList)
-async def get_draft_player_values(
-    payload: PlayerValuesPayload,
+@router.get("/players/value", response_model=DraftPlayerValueList)
+def get_draft_player_values(
     current_user_id: int = Depends(get_user_id),  # 인증만 필요, user_id는 직접 안 씀
 ):
-    config = payload.config
-    picks = payload.picks
-
     # Local DB cache: active batters + pitchers. Two-way players are collapsed to one row.
     sql = sa_text("""
         SELECT player_id, MAX(player_value) AS player_value
@@ -622,6 +727,32 @@ async def get_draft_player_values(
     """)
     with engine.connect() as conn:
         cache_rows = conn.execute(sql).fetchall()
+
+    items = [
+        DraftPlayerValue(
+            playerId=str(r._mapping["player_id"]),
+            ppaValue=(
+                float(r._mapping["player_value"])
+                if r._mapping["player_value"] is not None
+                else None
+            ),
+        )
+        for r in cache_rows
+    ]
+
+    return DraftPlayerValueList(items=items)
+
+
+########################## 선수 1명의 추천 입찰가 (외부 API) ##########################
+# Add 모달이 열릴 때만 호출된다. 페이지 로드 시 전체 호출하던 패턴을 폐기.
+# config + picks 는 league_context / draft_context 계산에 필요.
+@router.post("/players/bid", response_model=DraftPlayerBid)
+async def get_draft_player_bid(
+    payload: PlayerBidPayload,
+    current_user_id: int = Depends(get_user_id),
+):
+    config = payload.config
+    picks = payload.picks
 
     # bid 계산은 메인 드래프트에만 의미가 있음 — 마이너/택시는 무료라서 budget/roster 카운트에서 제외.
     main_picks = [p for p in picks if (p.kind or "main") == "main"]
@@ -639,41 +770,21 @@ async def get_draft_player_values(
         "my_positions_filled": [p.slotPos for p in my_picks if p.slotPos],
     }
 
-    # 각 선수에 대해 bid 병렬 호출. 세마포어로 동시성 상한을 둬서 in-flight 요청 폭주 방지.
-    # 개별 bid 실패는 해당 선수 bid만 0으로 반환하고 전체 응답은 유지.
-    # async with로 PpaApiClient를 열어 모든 호출이 같은 connection pool 사용 (TCP/TLS 재활용).
-    semaphore = asyncio.Semaphore(30)
-    player_ids = [int(r._mapping["player_id"]) for r in cache_rows]
+    req_payload = {
+        "player_id": int(payload.playerId),
+        "league_context": league_context,
+        "draft_context": draft_context,
+    }
 
     async with build_ppa_api_client() as client:
-        async def fetch_bid(player_id: int) -> Optional[int]:
-            req_payload = {
-                "player_id": player_id,
-                "league_context": league_context,
-                "draft_context": draft_context,
-            }
-            async with semaphore:
-                try:
-                    response = await client.player_bid(req_payload)
-                except ApiError as exc:
-                    logger.warning("player_bid failed for player_id=%s: %s", player_id, exc)
-                    return None
-            recommended_bid = response.get("recommended_bid")
-            return int(recommended_bid) if recommended_bid is not None else None
+        try:
+            response = await client.player_bid(req_payload)
+        except ApiError as exc:
+            logger.warning("player_bid failed for player_id=%s: %s", payload.playerId, exc)
+            return DraftPlayerBid(playerId=payload.playerId, recommendedBid=None)
 
-        bids = await asyncio.gather(*[fetch_bid(pid) for pid in player_ids])
-
-    items = [
-        DraftPlayerValue(
-            playerId=str(r._mapping["player_id"]),
-            ppaValue=(
-                float(r._mapping["player_value"])
-                if r._mapping["player_value"] is not None
-                else None
-            ),
-            recommendedBid=bid,
-        )
-        for r, bid in zip(cache_rows, bids)
-    ]
-
-    return DraftPlayerValueList(items=items)
+    recommended_bid = response.get("recommended_bid")
+    return DraftPlayerBid(
+        playerId=payload.playerId,
+        recommendedBid=int(recommended_bid) if recommended_bid is not None else None,
+    )
