@@ -3,7 +3,6 @@
 # slot assignment, and bootstrap.
 # Player metadata and value come from the batter_caching table; recommended bids
 # are computed in real time via the external API's POST /player/bid/id.
-import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Tuple
@@ -71,11 +70,16 @@ class PlayerSummaryList(BaseModel):
 class DraftPlayerValue(BaseModel):
     playerId: str
     ppaValue: Optional[float] = None
-    recommendedBid: Optional[int] = None
 
 
 class DraftPlayerValueList(BaseModel):
     items: List[DraftPlayerValue]
+
+
+# Add 모달이 열릴 때 1명에 대해서만 외부 API로 bid를 계산해 돌려준다.
+class DraftPlayerBid(BaseModel):
+    playerId: str
+    recommendedBid: Optional[int] = None
 
 
 # 드래프트 된 야구선수의 세부 현황 및 조건
@@ -127,8 +131,10 @@ class UpdateSessionPayload(BaseModel):
     picks: List[PlayerDraftStatusIndex]
 
 
-# /players/values는 unsaved 드래프트도 추천가를 받아야 하므로 sessionId가 아닌 body로 직접 전달.
-class PlayerValuesPayload(BaseModel):
+# /players/bid는 unsaved 드래프트도 추천가를 받아야 하므로 sessionId가 아닌 body로 직접 전달.
+# 선수 1명에 대해서만 호출되므로 playerId 도 같이 받는다.
+class PlayerBidPayload(BaseModel):
+    playerId: str
     config: DraftConfig
     picks: List[PlayerDraftStatusIndex]
 
@@ -599,17 +605,14 @@ def get_draft_players(league: Optional[str] = None):
 
 
 
-########################## 선수별 PPA 가치 + 추천 입찰가 ##########################
-# unsaved 드래프트도 추천가를 받을 수 있도록 sessionId 대신 body로 config + picks를 받음.
+########################## 선수별 PPA 가치 (DB 캐시) ##########################
+# 전체 선수의 ppaValue 를 한 번에 반환. DB 캐시만 읽으므로 즉시 응답.
+# bid 는 분리되어 /players/bid 가 1명씩 처리한다.
 # 드래프트 세션은 로그인된 사용자만 사용 가능하므로 Depends.
-@router.post("/players/values", response_model=DraftPlayerValueList)
-async def get_draft_player_values(
-    payload: PlayerValuesPayload,
+@router.get("/players/value", response_model=DraftPlayerValueList)
+def get_draft_player_values(
     current_user_id: int = Depends(get_user_id),  # 인증만 필요, user_id는 직접 안 씀
 ):
-    config = payload.config
-    picks = payload.picks
-
     # Local DB cache: active batters + pitchers. Two-way players are collapsed to one row.
     sql = sa_text("""
         SELECT player_id, MAX(player_value) AS player_value
@@ -622,6 +625,32 @@ async def get_draft_player_values(
     """)
     with engine.connect() as conn:
         cache_rows = conn.execute(sql).fetchall()
+
+    items = [
+        DraftPlayerValue(
+            playerId=str(r._mapping["player_id"]),
+            ppaValue=(
+                float(r._mapping["player_value"])
+                if r._mapping["player_value"] is not None
+                else None
+            ),
+        )
+        for r in cache_rows
+    ]
+
+    return DraftPlayerValueList(items=items)
+
+
+########################## 선수 1명의 추천 입찰가 (외부 API) ##########################
+# Add 모달이 열릴 때만 호출된다. 페이지 로드 시 전체 호출하던 패턴을 폐기.
+# config + picks 는 league_context / draft_context 계산에 필요.
+@router.post("/players/bid", response_model=DraftPlayerBid)
+async def get_draft_player_bid(
+    payload: PlayerBidPayload,
+    current_user_id: int = Depends(get_user_id),
+):
+    config = payload.config
+    picks = payload.picks
 
     # bid 계산은 메인 드래프트에만 의미가 있음 — 마이너/택시는 무료라서 budget/roster 카운트에서 제외.
     main_picks = [p for p in picks if (p.kind or "main") == "main"]
@@ -639,41 +668,21 @@ async def get_draft_player_values(
         "my_positions_filled": [p.slotPos for p in my_picks if p.slotPos],
     }
 
-    # 각 선수에 대해 bid 병렬 호출. 세마포어로 동시성 상한을 둬서 in-flight 요청 폭주 방지.
-    # 개별 bid 실패는 해당 선수 bid만 0으로 반환하고 전체 응답은 유지.
-    # async with로 PpaApiClient를 열어 모든 호출이 같은 connection pool 사용 (TCP/TLS 재활용).
-    semaphore = asyncio.Semaphore(30)
-    player_ids = [int(r._mapping["player_id"]) for r in cache_rows]
+    req_payload = {
+        "player_id": int(payload.playerId),
+        "league_context": league_context,
+        "draft_context": draft_context,
+    }
 
     async with build_ppa_api_client() as client:
-        async def fetch_bid(player_id: int) -> Optional[int]:
-            req_payload = {
-                "player_id": player_id,
-                "league_context": league_context,
-                "draft_context": draft_context,
-            }
-            async with semaphore:
-                try:
-                    response = await client.player_bid(req_payload)
-                except ApiError as exc:
-                    logger.warning("player_bid failed for player_id=%s: %s", player_id, exc)
-                    return None
-            recommended_bid = response.get("recommended_bid")
-            return int(recommended_bid) if recommended_bid is not None else None
+        try:
+            response = await client.player_bid(req_payload)
+        except ApiError as exc:
+            logger.warning("player_bid failed for player_id=%s: %s", payload.playerId, exc)
+            return DraftPlayerBid(playerId=payload.playerId, recommendedBid=None)
 
-        bids = await asyncio.gather(*[fetch_bid(pid) for pid in player_ids])
-
-    items = [
-        DraftPlayerValue(
-            playerId=str(r._mapping["player_id"]),
-            ppaValue=(
-                float(r._mapping["player_value"])
-                if r._mapping["player_value"] is not None
-                else None
-            ),
-            recommendedBid=bid,
-        )
-        for r, bid in zip(cache_rows, bids)
-    ]
-
-    return DraftPlayerValueList(items=items)
+    recommended_bid = response.get("recommended_bid")
+    return DraftPlayerBid(
+        playerId=payload.playerId,
+        recommendedBid=int(recommended_bid) if recommended_bid is not None else None,
+    )
