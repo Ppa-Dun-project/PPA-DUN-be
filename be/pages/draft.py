@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Literal, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from contract_rollover import ContractCode
 from database.draft_store import load_draft_config
 from orm.session import engine
 from ppa_api.ppa_client import ApiError, build_ppa_api_client
@@ -56,6 +57,8 @@ class DraftConfig(BaseModel):
     myTeamName: str
     opponentsCount: int
     oppTeamNames: List[str]
+    # keeper 롤오버의 기준 시즌. 옛 세션에는 없어 None일 수 있음.
+    targetSeason: Optional[int] = None
 
 # 사용자와 상대의 각 생성된 정보
 class DraftTeam(BaseModel):
@@ -88,6 +91,10 @@ class PlayerDraftStatus(BaseModel):
     type: DraftPickType
     # 메인/마이너/택시 보드 구분. 옛 데이터 호환을 위해 default "main".
     kind: DraftPickKind = "main"
+    # Keeper 계약 코드 (영입 당시 원본). 내 픽 이외(상대팀/마이너/택시)는 None.
+    contractCode: Optional[ContractCode] = None
+    # 이 픽이 영입된 세션의 target_season. rollover 계산에 사용.
+    signedSeason: Optional[int] = None
 
 
 # 선수의 픽 상태 (어떤 팀이 픽했는지, 어떤 포지션에 배치됐는지, 가격은 얼마인지 등)
@@ -234,6 +241,8 @@ def normalize_pick_team_ids(picks: List[PlayerDraftStatusIndex]) -> List[PlayerD
             bid=p.bid,
             type=p.type,
             kind=p.kind,
+            contractCode=p.contractCode,
+            signedSeason=p.signedSeason,
         )
         for p in picks
     ]
@@ -257,6 +266,8 @@ def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
             bid=r["bid"],                         # 입찰되었던 가격
             type=r["type"],                       # 픽 유형
             kind=r.get("kind") or "main",         # 보드 구분 (옛 행은 main 폴백)
+            contractCode=r.get("contractCode"),   # keeper 계약 코드 (영입 당시 원본)
+            signedSeason=r.get("signedSeason"),   # 영입 세션의 target_season
         )
         for r in rows
     ]
@@ -270,6 +281,7 @@ def normalized_config(
     my_team_name: str,
     opp_team_names: List[str],
     opponents_count: int,
+    target_season: Optional[int] = None,
 ) -> Tuple[DraftConfig, List[DraftTeam]]:
 
     # 사용자가 최대, 최소 범위를 벗어날 경우 normalization
@@ -295,6 +307,7 @@ def normalized_config(
         myTeamName=teams[0].name,
         opponentsCount=normalized_opponents,
         oppTeamNames=opps,
+        targetSeason=target_season,
     )
 
     # 드래프트 설정 정보 + 전체 팀 정보 반환
@@ -321,6 +334,8 @@ def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
             "bid": p.bid,
             "pick_type": p.type,
             "kind": p.kind,
+            "contract_code": p.contractCode,
+            "signed_season": p.signedSeason,
         }
         for p in picks
     ]
@@ -362,6 +377,7 @@ def create_user_session(
         my_team_name=payload.config.myTeamName,
         opp_team_names=payload.config.oppTeamNames,
         opponents_count=payload.config.opponentsCount,
+        target_season=payload.config.targetSeason,
     )
 
     name = payload.name.strip() or "Untitled Draft"
@@ -380,6 +396,7 @@ def create_user_session(
         my_team_name=config.myTeamName,
         opp_team_names=config.oppTeamNames,
         opponents_count=config.opponentsCount,
+        target_season=config.targetSeason,
     )
 
     picks = normalize_pick_team_ids(payload.picks)
@@ -415,6 +432,7 @@ def get_session_detail(
         my_team_name=config_row["my_team_name"],
         opp_team_names=config_row["opp_team_names"] or [],
         opponents_count=config_row["opponents_count"],
+        target_season=config_row.get("target_season"),
     )
 
     picks = get_session_picks(session_id)
@@ -452,6 +470,7 @@ def update_user_session(
         my_team_name=config_row["my_team_name"],
         opp_team_names=config_row["opp_team_names"] or [],
         opponents_count=config_row["opponents_count"],
+        target_season=config_row.get("target_season"),
     )
     return SessionDetail(
         id=session_id,

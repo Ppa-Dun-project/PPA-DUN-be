@@ -5,7 +5,7 @@
 -- 사용법:
 --   mysql -u <user> -p <database> < init.sql
 --
--- 최종 업데이트: 2026-04-08
+-- 최종 업데이트: 2026-05-17
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS `draft_config` (
     `my_team_name`    VARCHAR(100)  DEFAULT NULL,
     `opp_team_names`  JSON          DEFAULT NULL,
     `opponents_count` INT           DEFAULT NULL,
+    `target_season`   INT           DEFAULT NULL,
     `created_at`      DATETIME      DEFAULT NULL,
     `updated_at`      DATETIME      DEFAULT NULL,
     PRIMARY KEY (`user_id`)
@@ -150,6 +151,9 @@ CREATE TABLE IF NOT EXISTS `draft_picks` (
     `slot_pos`            VARCHAR(10)   DEFAULT NULL,
     `bid`                 INT           DEFAULT NULL,
     `pick_type`           VARCHAR(10)   DEFAULT NULL,
+    `kind`                VARCHAR(10)   NOT NULL DEFAULT 'main',
+    `contract_code`       VARCHAR(4)    DEFAULT NULL,
+    `signed_season`       INT           DEFAULT NULL,
     `created_at`          DATETIME      DEFAULT NULL,
     PRIMARY KEY (`id`),
     UNIQUE KEY `uq_user_player` (`user_id`, `player_id`),
