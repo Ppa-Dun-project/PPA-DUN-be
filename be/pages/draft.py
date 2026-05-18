@@ -559,7 +559,7 @@ def update_session_note(
 def get_draft_players(league: Optional[str] = None):
     where_clause = "WHERE league = :league" if league else ""
     batter_sql = sa_text(f"""
-        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab, r, h, 1b, 2b, 3b, bb, k, cs, obp, slg
+        SELECT player_id, name, position, team, avg, hr, rbi, sb, ab, r, h, single, double, triple, bb, k, cs, obp, slg
         FROM batter_caching
         {where_clause}
     """)
