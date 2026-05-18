@@ -36,17 +36,43 @@ class PlayerSummary(BaseModel):
     playerType: PlayerType
     positions: List[DraftPosition]
     team: str
-    avg: Optional[float] = None
+    # ── Batter stats ─────────────────────────────────────────────────
+    ab: Optional[int] = None
+    r: Optional[int] = None
+    h: Optional[int] = None
+    single: Optional[int] = None
+    double: Optional[int] = None
+    triple: Optional[int] = None
     hr: Optional[int] = None
     rbi: Optional[int] = None
+    bb: Optional[int] = None
+    k: Optional[int] = None
     sb: Optional[int] = None
-    ab: Optional[int] = None
+    cs: Optional[int] = None
+    avg: Optional[float] = None
+    obp: Optional[float] = None
+    slg: Optional[float] = None
+    # ── Pitcher stats (h/r/hr/bb shared with batter — context-dependent) ──
     w: Optional[int] = None
+    l: Optional[int] = None
     sv: Optional[int] = None
     so: Optional[int] = None
     era: Optional[float] = None
     whip: Optional[float] = None
     ip: Optional[float] = None
+    g: Optional[int] = None
+    gs: Optional[int] = None
+    war: Optional[float] = None
+    fip: Optional[float] = None
+    er: Optional[int] = None
+    hbp: Optional[int] = None
+    bf: Optional[int] = None
+    era_plus: Optional[int] = None
+    h9: Optional[float] = None
+    hr9: Optional[float] = None
+    bb9: Optional[float] = None
+    so9: Optional[float] = None
+    so_bb: Optional[float] = None
 
 # 드래프트 세션 설정에 관한 값들
 class DraftConfig(BaseModel):
@@ -591,11 +617,21 @@ def get_draft_players(league: Optional[str] = None):
             playerType="batter",
             positions=[draft_pos],
             team=m["team"] or "",
-            avg=nullable_float(m["avg"]),
+            ab=nullable_int(m["ab"]),
+            r=nullable_int(m["r"]),
+            h=nullable_int(m["h"]),
+            single=nullable_int(m["single"]),
+            double=nullable_int(m["double"]),
+            triple=nullable_int(m["triple"]),
             hr=nullable_int(m["hr"]),
             rbi=nullable_int(m["rbi"]),
+            bb=nullable_int(m["bb"]),
+            k=nullable_int(m["k"]),
             sb=nullable_int(m["sb"]),
-            ab=nullable_int(m["ab"]),
+            cs=nullable_int(m["cs"]),
+            avg=nullable_float(m["avg"]),
+            obp=nullable_float(m["obp"], 3),
+            slg=nullable_float(m["slg"], 3),
         )
 
     for row in pitcher_rows:
@@ -604,15 +640,32 @@ def get_draft_players(league: Optional[str] = None):
         draft_pos = draft_position_for(m["position"], "SP")
         existing = items_by_id.get(player_id)
         if existing is not None:
+            # two_way: batter row 가 이미 차있고 pitcher row 도 있는 경우.
+            # 공유 필드 (h/r/hr/bb) 는 batter 의미를 보존해야 하므로 안 덮음.
+            # pitcher-only 필드들만 채운다.
             existing.playerType = "two_way"
             if draft_pos not in existing.positions:
                 existing.positions.append(draft_pos)
             existing.w = nullable_int(m["w"])
+            existing.l = nullable_int(m["l"])
             existing.sv = nullable_int(m["sv"])
             existing.so = nullable_int(m["so"])
             existing.era = nullable_float(m["era"], 2)
             existing.whip = nullable_float(m["whip"], 3)
             existing.ip = nullable_float(m["ip"], 1)
+            existing.g = nullable_int(m["g"])
+            existing.gs = nullable_int(m["gs"])
+            existing.war = nullable_float(m["war"], 2)
+            existing.fip = nullable_float(m["fip"], 2)
+            existing.er = nullable_int(m["er"])
+            existing.hbp = nullable_int(m["hbp"])
+            existing.bf = nullable_int(m["bf"])
+            existing.era_plus = nullable_int(m["era_plus"])
+            existing.h9 = nullable_float(m["h9"], 2)
+            existing.hr9 = nullable_float(m["hr9"], 2)
+            existing.bb9 = nullable_float(m["bb9"], 2)
+            existing.so9 = nullable_float(m["so9"], 2)
+            existing.so_bb = nullable_float(m["so_bb"], 2)
             continue
 
         items_by_id[player_id] = PlayerSummary(
@@ -621,12 +674,32 @@ def get_draft_players(league: Optional[str] = None):
             playerType="pitcher",
             positions=[draft_pos],
             team=m["team"] or "",
+            # 공유 필드 — pitcher 의미 (피안타/실점/피홈런/볼넷허용)
+            h=nullable_int(m["h"]),
+            r=nullable_int(m["r"]),
+            hr=nullable_int(m["hr"]),
+            bb=nullable_int(m["bb"]),
+            # pitcher-only
             w=nullable_int(m["w"]),
+            l=nullable_int(m["l"]),
             sv=nullable_int(m["sv"]),
             so=nullable_int(m["so"]),
             era=nullable_float(m["era"], 2),
             whip=nullable_float(m["whip"], 3),
             ip=nullable_float(m["ip"], 1),
+            g=nullable_int(m["g"]),
+            gs=nullable_int(m["gs"]),
+            war=nullable_float(m["war"], 2),
+            fip=nullable_float(m["fip"], 2),
+            er=nullable_int(m["er"]),
+            hbp=nullable_int(m["hbp"]),
+            bf=nullable_int(m["bf"]),
+            era_plus=nullable_int(m["era_plus"]),
+            h9=nullable_float(m["h9"], 2),
+            hr9=nullable_float(m["hr9"], 2),
+            bb9=nullable_float(m["bb9"], 2),
+            so9=nullable_float(m["so9"], 2),
+            so_bb=nullable_float(m["so_bb"], 2),
         )
 
     return PlayerSummaryList(items=list(items_by_id.values()))
