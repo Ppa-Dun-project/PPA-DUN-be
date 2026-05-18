@@ -89,6 +89,8 @@ class DraftPlayerBid(BaseModel):
 class PlayerDraftStatus(BaseModel):
     playerId: str
     draftedByTeamId: str
+    # 옥션에서 선수를 지명(올린) 팀. 옛 데이터엔 없어 nullable.
+    broughtUpByTeamId: Optional[str] = None
     # 마이너/택시는 포지션 슬롯이 없어 None.
     slotPos: Optional[DraftPosition] = None
     bid: Optional[int] = None
@@ -242,6 +244,7 @@ def normalize_pick_team_ids(picks: List[PlayerDraftStatusIndex]) -> List[PlayerD
         PlayerDraftStatusIndex(
             playerId=p.playerId,
             draftedByTeamId=normalize_draft_team_id(p.draftedByTeamId),
+            broughtUpByTeamId=p.broughtUpByTeamId,
             slotIndex=p.slotIndex,
             slotPos=p.slotPos,
             bid=p.bid,
@@ -267,6 +270,7 @@ def get_session_picks(session_id: int) -> List[PlayerDraftStatusIndex]:
         PlayerDraftStatusIndex(
             playerId=r["playerId"],               # 선수 ID
             draftedByTeamId=normalize_draft_team_id(r["draftedByTeamId"]), # 해당 선수를 뽑은 팀 ID
+            broughtUpByTeamId=r.get("broughtUpByTeamId"),  # 옥션에서 지명한 팀 (옛 행은 None)
             slotIndex=r["slotIndex"],             # 슬롯 인덱스
             slotPos=r["slotPos"],                 # 배정된 포지션 (마이너/택시는 None)
             bid=r["bid"],                         # 입찰되었던 가격
@@ -335,6 +339,7 @@ def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
         {
             "player_id": p.playerId,
             "drafted_by_team_id": normalize_draft_team_id(p.draftedByTeamId),
+            "brought_up_by_team_id": p.broughtUpByTeamId,
             "slot_index": p.slotIndex,
             "slot_pos": p.slotPos,
             "bid": p.bid,
