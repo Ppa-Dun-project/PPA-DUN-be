@@ -354,7 +354,6 @@ def _picks_to_dicts(picks: List[PlayerDraftStatusIndex]) -> List[dict]:
 
 
 ############################ 세션 관리 #############################
-
 # 내 세션 목록. 최근에 연 순으로 정렬됨.
 @router.get("/sessions", response_model=SessionList)
 def list_user_sessions(current_user_id: int = Depends(get_user_id)):
