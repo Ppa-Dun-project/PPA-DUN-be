@@ -106,7 +106,7 @@ def build_batter_detail(player_id: int) -> PlayerOut:
         SELECT player_id, name, position, team,
                current_age, height, weight, bat_side, pitch_hand,
                ab, r, h, hr, rbi, bb, k, sb, cs,
-               avg, obp, slg, player_value
+               avg, obp, slg, player_value, depth_order
         FROM batter_caching
         WHERE player_id = :player_id
     """)
@@ -150,6 +150,7 @@ def build_batter_detail(player_id: int) -> PlayerOut:
             cs=int_value(m["cs"]),
             obp=obp,
             slg=slg,
+            depth_order=int_value(m["depth_order"])
         ),
     )
 
@@ -160,7 +161,7 @@ def build_pitcher_detail(player_id: int) -> PlayerOut:
                current_age, height, weight, pitch_hand, player_value,
                w, sv, so, era, whip, ip,
                l, g, gs, war, fip, h, r, er, hr, bb, hbp, bf,
-               era_plus, h9, hr9, bb9, so9, so_bb
+               era_plus, h9, hr9, bb9, so9, so_bb, depth_order
         FROM pitcher_caching
         WHERE player_id = :player_id
     """)
@@ -209,6 +210,7 @@ def build_pitcher_detail(player_id: int) -> PlayerOut:
             bb9=float_value(m["bb9"], 2),
             so9=float_value(m["so9"], 2),
             so_bb=float_value(m["so_bb"], 2),
+            depth_order=int_value(m["depth_order"]),
         ),
     )
 
